@@ -84,10 +84,47 @@
             transform: scale(1.1) translateY(-5px);
             border-color: #f0fd01; /* 스플래툰 옐로우 */
         }
+
+        #controls-help {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7); /* 반투명 검은색 */
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            font-family: 'Pretendard', sans-serif;
+            font-size: 14px;
+            pointer-events: none; /* 마우스 클릭이 가이드를 통과해 캔버스로 전달되게 함 */
+            z-index: 1000;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        #controls-help h3 {
+            margin: 0 0 10px 0;
+            font-size: 16px;
+            text-align: center;
+            color: #ffd400; /* 스플래툰 느낌의 노란색 포인트 */
+        }
+
+        #controls-help ul {
+            list-index: none;
+            margin: 0;
+            padding: 0;
+            list-style: none;
+        }
+
+        #controls-help li {
+            margin-bottom: 5px;
+        }
+
+        #controls-help strong {
+            color: #00ffcc; /* 하늘색 포인트 */
+        }
     </style>
 </head>
 <body>
-    <div id="info">FBX 모델 뷰어 - 마우스로 회전하세요</div>
+    <div id="info">Splatoon 3 Weapon Viewer</div>
     <div id="side-panel">
         <h2 id="list-title">무기</h2> 
         <ul id="model-list"></ul>
@@ -103,6 +140,15 @@
         }
       }
     </script>
+        <div id="controls-help">
+        <h3>🎮 조작 가이드 🎮</h3>
+        <ul>
+            <li><strong>회전:</strong> 마우스 왼쪽 클릭 드래그</li>
+            <li><strong>이동:</strong> 마우스 오른쪽 클릭 드래그</li>
+            <li><strong>확대/축소:</strong> 마우스 휠</li>
+            <li><strong>잉크 색상 변경:</strong> 우하단 컬러 피커 활용</li>
+        </ul>
+    </div>
     <script type="module" src="main.js"></script>
     <div id="color-picker-container">
         <label>잉크 색</label>
