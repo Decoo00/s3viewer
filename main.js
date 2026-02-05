@@ -4,7 +4,6 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 /**
  * TODO
- * _Trm.png : 트림 텍스처 (현재 무시됨)
  * 언어추가?
  */
 
@@ -481,7 +480,23 @@ const weaponData = [
         ]
      },
     { id: 'Blaster', name: '블래스터', img: 'wpntypes/IconTypeWpn_01.png' },
-    { id: 'Maneuver', name: '머뉴버', img: 'wpntypes/IconTypeWpn_02.png' },
+    { id: 'Maneuver', name: '머뉴버(우)', img: 'wpntypes/IconTypeWpn_02.png',
+        items: [
+            {name: '스플랫 머뉴버', file: 'NormalT'},
+            {name: '스플랫 머뉴버 컬래버', file: 'NormalT_Cstm01'},
+            {name: '오더 머뉴버 레플리카', file: 'NormalSdodr'},
+            {name: '스퍼터리', file: 'Short'},
+            {name: '스퍼터리 휴', file: 'Short_Cstm01'},
+            {name: '블랙 쿼드 호퍼', file: 'Stepper'},
+            {name: '화이트 쿼드 호퍼', file: 'Stepper_Cstm01'},
+            {name: '소방 FF', file: 'Long'},
+            {name: '듀얼 스위퍼', file: 'Dual'},
+            {name: '커스텀 듀얼 스위퍼', file: 'Dual_Cstm01'},
+            {name: '켈빈 525', file: 'Gallon'},
+            {name: '켈빈 525 데코', file: 'Gallon_Cstm01'},
+            {name: 'Mr. 베어표 머뉴버', file: 'Coop'},
+        ]
+    },
     { id: 'Spinner', name: '스피너', img: 'wpntypes/IconTypeWpn_03.png' },
     { id: 'Charger', name: '차저', img: 'wpntypes/IconTypeWpn_04.png' },
     { id: 'Roller', name: '롤러', img: 'wpntypes/IconTypeWpn_05.png' },
