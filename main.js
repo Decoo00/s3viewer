@@ -32,7 +32,7 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 // 2. 조명 추가 (모델이 잘 보이게 하기 위함)
-const hemiLight = new THREE.HemisphereLight(0xffffff, 0xbbbbbb, 2);
+const hemiLight = new THREE.HemisphereLight(0xffffff, 0xbbbbbb, 1);
 scene.add(hemiLight);
 
 const dirLight = new THREE.DirectionalLight(0xffffff, 4);
@@ -89,7 +89,7 @@ const floor = new THREE.Mesh(planeGeometry, planeMaterial);
 floor.rotation.x = -Math.PI / 2;
 
 // 3. 모델보다 살짝 아래에 위치 (모델 위치에 따라 조정)
-floor.position.y = -0.9;
+floor.position.y = -1.3;
 
 // 4. 그림자를 받고 싶다면 (renderer 설정에 shadowMap.enabled = true 필요)
 floor.receiveShadow = true;
@@ -126,12 +126,13 @@ function loadModel(fileName) {
     }
     const textureLoader = new THREE.TextureLoader();
     const loader = new FBXLoader();
-
+    
     loader.load(`models/${fileName}`, (object) => {
         currentModel = object;
         
 
         const folderPath = fileName.substring(0, fileName.lastIndexOf('/') + 1);
+        console.log(`경로: ${folderPath}, 파일명: ${fileName}`);
         object.traverse((child) => {
             if (child.isMesh) {
                 console.log(`메시 발견: ${child.name}`);
@@ -160,7 +161,7 @@ function loadModel(fileName) {
                     if (child.name.includes('Body')){
                         albFileName = "M_Body_Alb";
                     }
-                    if (child.name.includes('Bottle')){
+                    else if (child.name.includes('Bottle')){
                         isBottle = true;
                         if (fileName.includes('Expert')){   // 프라임 슈터
                             albFileName = "M_Body_Alb";
@@ -169,13 +170,23 @@ function loadModel(fileName) {
                             albFileName = "M_Bottle_Alb";
                         }
                     }
-                    if (child.name.includes('Logo')){
+                    else if (child.name.includes('Logo')){
                         albFileName = "M_Logo_Alb";
                     }
+                    else if (child.name.includes('Case_Clear')){
+                        albFileName = "M_Case_Clear_Alb";
+                    }
+                    else if (child.name.includes('Case')){
+                        albFileName = "M_Case_Alb";
+                    }
+                    // 임시
+                    // if (child.name.includes("NoCase")){
+
 
                     if (child.name.includes("Cstm01")){
                         albFileName = albFileName.replace("Alb","Cstm01_Alb");
                     }
+
                     // if (child.name.includes('Bottle')){
                     //     albFileName = "M_Bottle_Alb";
                     // }
@@ -321,7 +332,7 @@ function loadModel(fileName) {
                     safeLoad(textureLoader, `models/${folderPath}${rghName}`).then((rghTex) => {
                         if (rghTex) {
                             newMat.roughnessMap = rghTex;
-                            child.material.roughness = 0.9;
+                            child.material.roughness = 0.5;
                             child.material.needsUpdate = true;
                         }
                     }, undefined, () => {console.log("Roughness Map 없음");});
@@ -330,7 +341,7 @@ function loadModel(fileName) {
                     safeLoad(textureLoader, `models/${folderPath}${aoName}`).then((aoTex) => {
                         if (aoTex) {
                             newMat.aoMap = aoTex;
-                            newMat.aoMapIntensity = 0.2;
+                            newMat.aoMapIntensity = 0.3;
                         }
                     }, undefined, () => {console.log("AO Map 없음");});
 
@@ -338,7 +349,7 @@ function loadModel(fileName) {
                     safeLoad(textureLoader, `models/${folderPath}${mtlName}`).then((mtlTex) => {
                         if (mtlTex) {
                             newMat.metalnessMap = mtlTex;
-                            newMat.metalness = 0.5;
+                            newMat.metalness = 0.9;
                             newMat.needsUpdate = true;
                         }
                     }, undefined, () => {console.log("Metalness Map 없음");});
@@ -348,7 +359,7 @@ function loadModel(fileName) {
                     safeLoad(textureLoader, `models/${folderPath}${nrmName}`).then((nrmTex) => {
                         if (nrmTex) {
                             newMat.normalMap = nrmTex;
-                            newMat.normalScale.set(1.5, 1.5);
+                            newMat.normalScale.set(1.0, 1.0);
                         }
                     }, undefined, () => {console.log("Normal Map 없음");});
 
@@ -618,6 +629,10 @@ const weaponData = [
             {name: '오더 와이퍼 레플리카', file: 'NormalSdodr'},
             {name: '드라이브 와이퍼', file: 'Light'},
             {name: '드라이브 와이퍼 데코', file: 'Light_Cstm01'},
+            {name: '민트 덴탈 와이퍼', file: 'Heavy'},
+            {name: '민트 덴탈 와이퍼(케이스X)', file: 'Heavy_NoCase'},
+            {name: '잉크 덴탈 와이퍼', file: 'Heavy_Cstm01'},
+            {name: '잉크 덴탈 와이퍼(케이스X)', file: 'Heavy_NoCase_Cstm01'},
             {name: 'Mr. 베어표 와이퍼', file: 'Coop'},
         ] }
 ];
@@ -639,8 +654,12 @@ weaponData.forEach(cat => {
         cat.items.forEach(item => {
             const li = document.createElement('li');
             li.textContent = item.name;
-            
-            li.onclick = () => loadModel(`Wmn_${cat.id}_${item.file}/Wmn_${cat.id}_${item.file}.fbx`); // 기존의 loadModel 함수 호출
+            var name = `Wmn_${cat.id}_${item.file}/Wmn_${cat.id}_${item.file}.fbx`
+            //임시
+            if (name.includes("_NoCase_Cstm01.fbx")) {
+                name = name.replace("_NoCase_Cstm01.fbx","_Cstm01.fbx");
+            }
+            li.onclick = () => loadModel(name); // 기존의 loadModel 함수 호출
             modelList.appendChild(li);
         });
     };
