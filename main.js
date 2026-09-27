@@ -7,13 +7,6 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
  * 언어추가?
  */
 
-
-const models = [
-    { name: '모델 1', file: 'Wmn_Slosher_Washtub_Cstm01.fbx' }, // 실제 파일명으로 바꾸세요
-    { name: '모델 2', file: 'Wmn_Charger_Quick.fbx' },
-    { name: '모델 3', file: 'Wmn_Blaster_Precision_Cstm03.fbx' }
-];
-
 let currentModel = null; // 현재 씬에 있는 모델을 담을 변수
 
 
@@ -118,16 +111,37 @@ function safeLoad(loader, path) {
     });
 }
 
+function disposeModel(model) {
+    model.traverse((child) => {
+        if (!child.isMesh) return;
+        child.geometry.dispose();
+        if (child.isSkinnedMesh) child.skeleton.dispose(); // boneTexture 해제
+        for (const mat of [].concat(child.material)) {
+            const uniformValues = Object.values(mat.userData).map((u) => u.value);
+            for (const v of [...Object.values(mat), ...uniformValues]) {
+                if (v?.isTexture) v.dispose();
+            }
+            mat.dispose();
+        }
+    });
+}
+
+let loadSeq = 0; // 가장 마지막으로 요청한 로드만 씬에 추가하기 위한 번호
+
 // 2. 모델을 화면에 띄우는 함수
 function loadModel(fileName) {
+    const seq = ++loadSeq;
     // 기존 모델이 있다면 삭제
     if (currentModel) {
         scene.remove(currentModel);
+        disposeModel(currentModel);
+        currentModel = null;
     }
     const textureLoader = new THREE.TextureLoader();
     const loader = new FBXLoader();
-    
+
     loader.load(`models/${fileName}`, (object) => {
+        if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
         currentModel = object;
         
 
@@ -156,8 +170,6 @@ function loadModel(fileName) {
                     albFileName = child.material.map.name;
                 }
                 else{
-                    console.log("씨빨ㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹㄹ");
-                    //albFileName = "M_Body_Alb";
                     if (child.name.includes('Body')){
                         albFileName = "M_Body_Alb";
                     }
@@ -179,23 +191,9 @@ function loadModel(fileName) {
                     else if (child.name.includes('Case')){
                         albFileName = "M_Case_Alb";
                     }
-                    // 임시
-                    // if (child.name.includes("NoCase")){
-
-
                     if (child.name.includes("Cstm01")){
                         albFileName = albFileName.replace("Alb","Cstm01_Alb");
                     }
-
-                    // if (child.name.includes('Bottle')){
-                    //     albFileName = "M_Bottle_Alb";
-                    // }
-                    // if (child.name.includes('_M_')) {
-                    //     const name = child.name.split('_M_')[1];
-                    //     if (name.includes('Logo')) {
-                    //         albFileName = "M_"+child.name.split('_M_')[1] + "_Alb";
-                    //     }
-                    // }
                 }
                 
                 
@@ -297,7 +295,6 @@ function loadModel(fileName) {
                     // --- Opa 로드 시도 ---
                     safeLoad( textureLoader, `models/${folderPath}${opaName}`).then((opaTex) => {
                         if (opaTex) {
-                            console.log("TLQKFSDFKJDSLOFSDLKFH");
                             newMat.userData.opaMap.value = opaTex;
 
                             newMat.transparent = true;
@@ -407,18 +404,6 @@ function loadModel(fileName) {
         console.error('에러 발생:', error);
     }); 
 }
-
-// 3. UI 리스트 동적 생성
-// const listElement = document.getElementById('model-list');
-// models.forEach(model => {
-//     const li = document.createElement('li');
-//     li.textContent = model.name;
-//     li.onclick = () => loadModel(model.file); // 클릭 시 해당 모델 로드
-//     listElement.appendChild(li);
-// });
-
-// // 초기 모델 로드 (첫 번째 모델)
-// loadModel(models[0].file);
 
 // 4. 팀 컬러 변경 UI
 const colorInput = document.getElementById('team-color-input');
@@ -654,11 +639,7 @@ weaponData.forEach(cat => {
         cat.items.forEach(item => {
             const li = document.createElement('li');
             li.textContent = item.name;
-            var name = `Wmn_${cat.id}_${item.file}/Wmn_${cat.id}_${item.file}.fbx`
-            //임시
-            if (name.includes("_NoCase_Cstm01.fbx")) {
-                name = name.replace("_NoCase_Cstm01.fbx","_Cstm01.fbx");
-            }
+            const name = `Wmn_${cat.id}_${item.file}/Wmn_${cat.id}_${item.file}.fbx`;
             li.onclick = () => loadModel(name); // 기존의 loadModel 함수 호출
             modelList.appendChild(li);
         });
