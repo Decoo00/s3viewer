@@ -31,7 +31,18 @@
             gap: 10px;
             pointer-events: none;
         }
-        #side-panel, #category-bar, #color-picker-container, #rotation-panel { pointer-events: auto; }
+        #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel { pointer-events: auto; }
+        #light-panel { /* 임시 위치: 우측, 회전 패널 위 */
+            position: absolute;
+            right: 20px;
+            top: 30%;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-family: sans-serif;
+            font-size: 14px;
+        }
         #rotation-panel {
             position: absolute; /* #ui 기준 우측 중앙 */
             right: 20px;
@@ -204,9 +215,17 @@
         <div id="bottom-bar">
             <div id="color-picker-container">
                 <label>잉크 색</label>
-                <input type="color" id="team-color-input" value="#ff00ff">
+                <input type="color" id="team-color-input" value="#fedc0c">
             </div>
             <div id="category-bar"></div>
+        </div>
+        <div id="light-panel">
+            <label>조명
+                <select id="light-preset">
+                    <option value="default">기본</option>
+                    <option value="studio">스튜디오</option>
+                </select>
+            </label>
         </div>
         <div id="rotation-panel" class="collapsible right">
             <button class="toggle-btn" aria-label="회전 패널 숨기기/펼치기"></button>

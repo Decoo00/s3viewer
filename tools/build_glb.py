@@ -3,6 +3,7 @@
 - 컬래버(_CstmNN) 파일이 기본 무기의 텍스처를 참조하면, 그 텍스처를 복사해 넣어서 glb 하나로 완결되게 만든다.
 - bfres 하나에 모델이 여러 개면(예: 우산+케이스, 듀얼 좌우) 모델마다 glb를 따로 만든다.
 - 머티리얼마다 셰이더 샘플러(_a0, _n0, _su0 …) → 텍스처 매핑과 셰이더 옵션을 material.extras.s3에 넣는다.
+- 붙은 본이 invisible인 셰이프는 node.extras.s3.hidden = true로 표시한다 (게임에서 기본으로 숨겨진 부품).
 
 usage: python build_glb.py <Model 폴더> <출력 폴더> [파일 패턴, 기본 Wmn_*.bfres.zs]
 환경 변수 BFRASS로 bfrass 실행 파일 경로를 지정할 수 있다 (기본: PATH의 bfrass).
@@ -53,6 +54,20 @@ def parse_mat_info(text):
         elif (m := re.match(r'^  option (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
             cur['options'][m.group(1)] = m.group(2)
     return mats
+
+
+def parse_shape_visibility(text):
+    """--debug 출력 → {model: {shape: bool}}. 셰이프가 붙은 본의 visible 플래그(bit 0)를 따른다.
+    예: 새싹 슈터는 스티커 셰이프가 붙은 Stecker_low 본이 invisible이라 게임에서 스티커가 안 보임."""
+    result, model, bones = {}, None, {}
+    for line in text.splitlines():
+        if m := re.match(r'^FMDL: name=(\S+)', line):
+            model, bones = result.setdefault(m.group(1), {}), {}
+        elif m := re.match(r'^  bone #(\d+) \S+: .*flags=0x([0-9A-Fa-f]+)', line):
+            bones[int(m.group(1))] = bool(int(m.group(2), 16) & 1)
+        elif m := re.match(r'^FSHP #\d+ (\S+): .*fsklIndx=(\d+)', line):
+            model[m.group(1)] = bones[int(m.group(2))]
+    return result
 
 
 def read_glb(path):
@@ -127,8 +142,13 @@ def build_file(bfres, out_dir, work):
     results = []
     for model, mats in models.items():
         tmp = os.path.join(work, model + '.glb')
-        mat_info = parse_mat_info(run('convert', bfres, '-m', model, '-o', tmp, '--mat-info', *extra))
+        out_text = run('convert', bfres, '-m', model, '-o', tmp, '--mat-info', '--debug', *extra)
+        mat_info = parse_mat_info(out_text)
+        shape_visible = parse_shape_visibility(out_text)[model]
         gltf, binary = read_glb(tmp)
+        for node in gltf['nodes']:
+            if 'mesh' in node and not shape_visible[node['name']]:
+                node.setdefault('extras', {})['s3'] = {'hidden': True}
         for mat in gltf.get('materials', []):
             name = mat['name']
             info = mat_info[name]
@@ -138,6 +158,14 @@ def build_file(bfres, out_dir, work):
                     tex_name = mats[name][mat_sampler]
                     textures[shader_sampler] = {'index': texture_for(gltf, binary, tex_name, tex_dirs), 'name': tex_name}
             mat.setdefault('extras', {})['s3'] = {'shader': info['shader'], 'textures': textures, 'options': info['options']}
+            # 표준 슬롯도 셰이더 샘플러 기준으로 채운다 (BfrAss는 공유/외부 텍스처일 때 비워둠)
+            pbr = mat.setdefault('pbrMetallicRoughness', {})
+            pbr.pop('baseColorTexture', None)
+            mat.pop('normalTexture', None)
+            if '_a0' in textures:
+                pbr['baseColorTexture'] = {'index': textures['_a0']['index']}
+            if '_n0' in textures:
+                mat['normalTexture'] = {'index': textures['_n0']['index']}
         out = os.path.join(out_dir, model + '.glb')
         write_glb(out, gltf, binary)
         results.append((model, os.path.getsize(out)))

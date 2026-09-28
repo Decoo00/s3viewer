@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 /**
  * TODO
@@ -62,7 +64,21 @@ scene.add(ambientLight);
 
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 pmremGenerator.compileEquirectangularShader();
-scene.environment = pmremGenerator.fromScene(new THREE.Scene()).texture;
+
+// 조명 프리셋: 기본 = 위의 직접 조명들 + 빈 환경맵, 스튜디오 = RoomEnvironment 환경맵만 (금속 반사용)
+const directLights = [hemiLight, dirLight, dirLight2, bottomLight, bottomLight2, ambientLight];
+const LIGHT_PRESETS = {
+    default: { environment: pmremGenerator.fromScene(new THREE.Scene()).texture, directLights: true },
+    studio: { environment: pmremGenerator.fromScene(new RoomEnvironment()).texture, directLights: false },
+};
+function applyLightPreset(name) {
+    const preset = LIGHT_PRESETS[name];
+    scene.environment = preset.environment;
+    for (const light of directLights) light.visible = preset.directLights;
+}
+const lightSelect = document.getElementById('light-preset');
+lightSelect.addEventListener('change', () => applyLightPreset(lightSelect.value));
+applyLightPreset(lightSelect.value);
 
 
 
@@ -248,7 +264,7 @@ floor.receiveShadow = true;
 scene.add(floor);
 
 
-const teamColor = new THREE.Color(0xFF2553);
+const teamColor = new THREE.Color(0xFEDC0C);
 
 function safeLoad(loader, path) {
     return new Promise(function(resolve) {
@@ -286,21 +302,92 @@ function disposeModel(model) {
 
 let loadSeq = 0; // 가장 마지막으로 요청한 로드만 씬에 추가하기 위한 번호
 
-// 2. 모델을 화면에 띄우는 함수
-function loadModel(fileName) {
-    const seq = ++loadSeq;
-    // 기존 모델이 있다면 삭제
+function clearModel() {
     if (currentModel) {
         modelPivot.remove(currentModel);
         disposeModel(currentModel);
         currentModel = null;
     }
+}
+
+// 모델을 중앙에 두고, 크기에 맞춰 카메라 위치 설정
+function placeModel(object) {
+    currentModel = object;
+    const box = new THREE.Box3().setFromObject(object);
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    object.position.sub(center);
+
+    const maxDim = Math.max(size.x, size.y, size.z);
+    const fov = camera.fov * (Math.PI / 180);
+    const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)); // 모델이 화면에 꽉 차는 거리
+    camera.position.set(-2 * cameraZ, cameraZ / 2, cameraZ / 2);
+    camera.lookAt(center);
+    controls.target.set(0, 0, 0);
+    controls.update();
+    modelPivot.quaternion.identity(); // 새 모델은 기본 방향부터
+    showRotation();
+    modelPivot.add(object);
+}
+
+// glb 머티리얼: 텍스처 역할(셰이더 샘플러 이름)은 변환 때 material.userData.s3에 기록됨 (tools/build_glb.py)
+const S3_MAPS = { roughnessMap: '_r0', metalnessMap: '_m0', aoMap: '_ao0', alphaMap: '_op0' };
+async function setupS3Material(material, parser) {
+    const { textures, options } = material.userData.s3;
+    const load = (key) => textures[key] ? parser.getDependency('texture', textures[key].index) : null;
+    for (const [prop, key] of Object.entries(S3_MAPS)) {
+        const tex = await load(key);
+        if (tex) material[prop] = tex;
+    }
+    // 맵이 없을 때는 Hoian_UBER 셰이더 기본값(roughness 0, metalness 0), 맵이 있으면 맵 값을 그대로 쓰도록 계수 1
+    material.roughness = material.roughnessMap ? 1 : 0;
+    material.metalness = material.metalnessMap ? 1 : 0;
+    if (material.alphaMap) material.alphaTest = 0.5;
+    const tclMap = await load('_su0');
+    // 알베도 텍스처를 끈 머티리얼만 전체가 잉크 색 (예: 스플랫 슈터 병). team_color_map_type 3이어도 알베도가 있으면 알베도 그대로 (예: 새싹/단풍 슈터 캡·스티커)
+    const fullTeamColor = options.team_color_map_type === '3' && options.enable_albedo_tex === 'False';
+    if (tclMap || fullTeamColor) {
+        material.userData.tclMap = { value: tclMap }; // userData에 둬야 disposeModel이 해제함
+        material.onBeforeCompile = (shader) => {
+            shader.uniforms.teamColor = { value: teamColor };
+            shader.uniforms.tclMap = material.userData.tclMap;
+            shader.vertexShader = 'varying vec2 vS3Uv;\n' + shader.vertexShader.replace(
+                '#include <uv_vertex>', '#include <uv_vertex>\nvS3Uv = uv;');
+            shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nvarying vec2 vS3Uv;\n' + shader.fragmentShader.replace(
+                '#include <map_fragment>',
+                `#include <map_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, teamColor, ${tclMap ? 'texture2D(tclMap, vS3Uv).r' : '1.0'});`);
+        };
+    }
+    material.needsUpdate = true;
+}
+
+function loadGlb(path) {
+    const seq = ++loadSeq;
+    clearModel();
+    new GLTFLoader().load(path, async (gltf) => {
+        const materials = new Set();
+        gltf.scene.traverse((child) => {
+            if (!child.isMesh) return;
+            child.castShadow = true;
+            child.receiveShadow = true;
+            if (child.userData.s3?.hidden) child.visible = false; // 게임에서 기본으로 숨겨진 부품 (붙은 본이 invisible)
+            materials.add(child.material);
+        });
+        await Promise.all([...materials].map((m) => setupS3Material(m, gltf.parser)));
+        if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
+        placeModel(gltf.scene);
+    }, undefined, (error) => console.error('에러 발생:', error));
+}
+
+// 2. 모델을 화면에 띄우는 함수 (FBX, glb로 옮기기 전 무기군용)
+function loadModel(fileName) {
+    const seq = ++loadSeq;
+    clearModel();
     const textureLoader = new THREE.TextureLoader();
     const loader = new FBXLoader();
 
     loader.load(`models/${fileName}`, (object) => {
         if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
-        currentModel = object;
         
 
         const folderPath = fileName.substring(0, fileName.lastIndexOf('/') + 1);
@@ -536,28 +623,7 @@ function loadModel(fileName) {
             }
         });
 
-        // 모델 크기 및 위치 자동 조정 (Bounding Box 활용)
-        const box = new THREE.Box3().setFromObject(object);
-        const size = box.getSize(new THREE.Vector3());
-        const center = box.getCenter(new THREE.Vector3());
-        object.position.sub(center); // 모델을 중앙으로 이동
-        
-
-        // 3. 모델 크기에 맞춰 카메라 위치 자동 설정
-        const maxDim = Math.max(size.x, size.y, size.z);
-        const fov = camera.fov * (Math.PI / 180);
-        // 모델이 화면에 꽉 차도록 적절한 거리 계산
-        let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-        
-        camera.position.set(-2*cameraZ, cameraZ/2, cameraZ/2);
-        
-        // 4. 카메라가 모델 중앙을 바라보게 하고 조작 제한 설정
-        camera.lookAt(center);
-        controls.target.set(0, 0, 0);
-        controls.update();
-        modelPivot.quaternion.identity(); // 새 모델은 기본 방향부터
-        showRotation();
-        modelPivot.add(object);
+        placeModel(object);
     }, (xhr) => {
         console.log((xhr.loaded / xhr.total * 100) + '% 로딩 중');
     }, (error) => {
@@ -602,24 +668,36 @@ window.addEventListener('resize', () => {
 
 
 const weaponData = [
-    { id: 'Shooter', name: '슈터', img: 'wpntypes/IconTypeWpn_00.png',
+    { id: 'Shooter', name: '슈터', img: 'wpntypes/IconTypeWpn_00.png', format: 'glb',
         items: [  
                 {name: '프로모델러 MG', file: 'Blaze'},
                 {name: '프로모델러 RG', file: 'Blaze_Cstm01'},
+                {name: '컬러 프로모델러', file: 'Blaze_Cstm02'},
                 {name: '프라임 슈터', file: 'Expert'},
                 {name: '프라임 슈터 컬래버', file: 'Expert_Cstm01'},
-                {name: '새싹 슈터', file: 'First_Cstm01'},
-                {name: '단풍 슈터', file: 'First'},
+                {name: '프라임 슈터 FRZN', file: 'Expert_Cstm02'},
+                {name: '새싹 슈터', file: 'First'},
+                {name: '단풍 슈터', file: 'First_Cstm01'},
                 {name: '보틀 가이저', file: 'Flash'},
                 {name: '포일 보틀 가이저', file: 'Flash_Cstm01'},
                 {name: '.52 갤런', file: 'Gravity'},
                 {name: '.52 갤런 데코', file: 'Gravity_Cstm01'},
                 {name: '.96 갤런', file: 'Heavy'},
                 {name: '.96 갤런 데코', file: 'Heavy_Cstm01'},
+                {name: '클로 .96 갤런', file: 'Heavy_Cstm02'},
                 {name: '제트 스위퍼', file: 'Long'},
                 {name: '커스텀 제트 스위퍼', file: 'Long_Cstm01'},
+                {name: '제트 스위퍼 COBR', file: 'Long_Cstm02'},
+                {name: '히어로 슈터(Lv0)', file: 'Msn0Lv0'},
+                {name: '히어로 슈터(Lv1)', file: 'Msn0Lv1'},
+                {name: '히어로 슈터(Lv2)', file: 'Msn0Lv2'},
+                //name: '스플랫 슈터(Splatoon1)', file: 'Normal'},
+                //name: '스플랫 슈터 컬래버(Splatoon1)', file: 'Normal_Cstm'},
+                //name: '스플랫 슈터(Splatoon2)', file: 'NormalB'},
+                //name: '스플랫 슈터 컬래버(Splatoon1)', file: 'Normal_Cstm'},
                 {name: '스플랫 슈터', file: 'NormalT'},
                 {name: '스플랫 슈터 컬래버', file: 'NormalT_Cstm01'},
+                {name: '글램 스플랫 슈터', file: 'NormalT_Cstm02'},
                 {name: '옥타 슈터 레플리카', file: 'RvSdodr'},
                 {name: '오더 슈터 레플리카', file: 'NormalSdodr'},
                 {name: '스페이스 슈터', file: 'QuickLong'},
@@ -628,11 +706,18 @@ const weaponData = [
                 {name: 'N-ZAP89', file: 'QuickMiddle_Cstm01'},
                 {name: '볼드 마커', file: 'Short'},
                 {name: '볼드 마커 네오', file: 'Short_Cstm01'},
+                {name: '샤프 마커', file: 'Precision'},
                 {name: '샤프 마커 네오', file: 'Short_Cstm11'},
-                {name: 'L3 릴 건', file: 'Triple'},
-                {name: 'L3 릴 건 D', file: 'Triple_Cstm01'},
+                {name: '샤프 마커 GECK', file: 'Short_Cstm12'},
+                {name: 'L3 릴 건', file: 'TripleQuick'},
+                {name: 'L3 릴 건 D', file: 'TripleQuick_Cstm01'},
+                {name: '글리터 L3 릴 건', file: 'TripleQuick_Cstm02'},
                 {name: 'H3 릴 건', file: 'TripleMiddle'},
                 {name: 'H3 릴 건 D', file: 'TripleMiddle_Cstm01'},
+                {name: 'H3 릴 건 SNAK', file: 'TripleMiddle_Cstm02'},
+                //{name: '스플랫 슈터(적,Lv0)', file: 'RvLv0'},
+                //{name: '스플랫 슈터(적,Lv1)', file: 'RvLv1'},
+                //{name: '스플랫 슈터(적,사이드오더)', file: 'RvSdodr'},
         ]
      },
     { id: 'Blaster', name: '블래스터', img: 'wpntypes/IconTypeWpn_01.png',
@@ -799,8 +884,8 @@ weaponData.forEach(cat => {
         cat.items.forEach(item => {
             const li = document.createElement('li');
             li.textContent = item.name;
-            const name = `Wmn_${cat.id}_${item.file}/Wmn_${cat.id}_${item.file}.fbx`;
-            li.onclick = () => loadModel(name); // 기존의 loadModel 함수 호출
+            const name = `Wmn_${cat.id}_${item.file}`;
+            li.onclick = cat.format === 'glb' ? () => loadGlb(`glb/${name}.glb`) : () => loadModel(`${name}/${name}.fbx`);
             modelList.appendChild(li);
         });
     };
