@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 
 /**
  * TODO
@@ -65,9 +66,166 @@ scene.environment = pmremGenerator.fromScene(new THREE.Scene()).texture;
 
 
 
-// 3. 360도 회전 컨트롤러 (OrbitControls)
+// 3. 카메라는 이동/확대만 담당하고, 회전은 모델 쪽에서 처리 (아래 modelPivot)
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; // 부드러운 회전 감도
+controls.enableRotate = false;
+
+// 모델 중심을 회전축으로 쓰기 위한 부모 그룹 (원점에 고정)
+const modelPivot = new THREE.Group();
+scene.add(modelPivot);
+
+// 드래그 방향을 카메라 기준 축으로 바꿔 모델을 회전 → 각도 제한 없음
+const ROTATE_SPEED = 0.01; // 1px당 라디안
+const activePointers = new Set();
+let lastX = 0, lastY = 0;
+renderer.domElement.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || gizmo.enabled) return; // 축 회전 모드에서는 기즈모가 처리
+    activePointers.add(e.pointerId);
+    lastX = e.clientX;
+    lastY = e.clientY;
+});
+renderer.domElement.addEventListener('pointermove', (e) => {
+    if (activePointers.size !== 1 || !activePointers.has(e.pointerId)) return; // 두 손가락은 확대/이동용
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    modelPivot.quaternion
+        .premultiply(new THREE.Quaternion().setFromAxisAngle(camUp, dx * ROTATE_SPEED))
+        .premultiply(new THREE.Quaternion().setFromAxisAngle(camRight, dy * ROTATE_SPEED));
+    showRotation();
+});
+for (const type of ['pointerup', 'pointercancel']) {
+    renderer.domElement.addEventListener(type, (e) => activePointers.delete(e.pointerId));
+}
+
+// 회전값 직접 입력 UI (월드 X/Y/Z축, Euler XYZ 순서, 단위: 도)
+const rotInputs = ['x', 'y', 'z'].map((axis) => document.getElementById(`rot-${axis}`));
+function showRotation() {
+    const r = modelPivot.rotation;
+    [r.x, r.y, r.z].forEach((rad, i) => {
+        rotInputs[i].value = +THREE.MathUtils.radToDeg(rad).toFixed(1);
+    });
+}
+rotInputs.forEach((input, i) => input.addEventListener('input', () => {
+    const deg = input.valueAsNumber;
+    if (Number.isNaN(deg)) return; // 입력 도중의 빈 값이나 '-'는 무시
+    modelPivot.rotation['xyz'[i]] = THREE.MathUtils.degToRad(deg);
+}));
+document.getElementById('rot-reset').addEventListener('click', () => {
+    modelPivot.rotation.set(0, 0, 0);
+    showRotation();
+});
+showRotation();
+
+// 축 회전 모드: 블렌더식 회전 기즈모 (X/Y/Z 링 + 화면 기준 E 링)
+const gizmo = new TransformControls(camera, renderer.domElement);
+gizmo.setMode('rotate');
+gizmo.attach(modelPivot);
+gizmo.enabled = false;
+gizmo.visible = false;
+scene.add(gizmo);
+gizmo.addEventListener('dragging-changed', (e) => { controls.enabled = !e.value; });
+gizmo.addEventListener('objectChange', showRotation);
+
+// 안쪽 자유 회전(XYZE)은 쓰지 않으므로 그 영역을 표시하는 회색 원 제거
+const rotateHandles = gizmo._gizmo.gizmo.rotate;
+rotateHandles.remove(rotateHandles.getObjectByName('XYZE'));
+
+// 링을 정확히 누르지 않아도, 화면상 RING_PICK_PX 이내의 가장 가까운 링을 잡게 함
+const RING_PICK_PX = 40;
+const ringVertex = new THREE.Vector3();
+function nearestRing(pointer) {
+    const w = renderer.domElement.clientWidth, h = renderer.domElement.clientHeight;
+    const px = (pointer.x + 1) / 2 * w, py = (1 - pointer.y) / 2 * h;
+    let best = null, bestDist = RING_PICK_PX;
+    for (const handle of gizmo._gizmo.gizmo.rotate.children) {
+        if (!handle.visible) continue;
+        const pos = handle.geometry.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            ringVertex.fromBufferAttribute(pos, i).applyMatrix4(handle.matrixWorld).project(camera);
+            const d = Math.hypot((ringVertex.x + 1) / 2 * w - px, (1 - ringVertex.y) / 2 * h - py);
+            if (d < bestDist) { bestDist = d; best = handle.name; }
+        }
+    }
+    return best;
+}
+const originalPointerHover = gizmo.pointerHover.bind(gizmo);
+gizmo.pointerHover = (pointer) => {
+    if (gizmo.dragging) return;
+    originalPointerHover(pointer);
+    if (gizmo.axis === null || gizmo.axis === 'XYZE') gizmo.axis = nearestRing(pointer);
+};
+
+// X/Y/Z 링 드래그를 각도 추적 방식으로: 포인터가 링 평면 위에서 중심 기준으로 돈 각도만큼 회전
+// (TransformControls 기본은 드래그 직선 거리로 계산해서 손이 링을 따라가지 않음)
+const EDGE_ON_COS = 0.15; // 링이 거의 옆으로 보이면 평면 교차가 불안정 → 이때만 기본 방식 사용
+const AXIS_VECTORS = { X: new THREE.Vector3(1, 0, 0), Y: new THREE.Vector3(0, 1, 0), Z: new THREE.Vector3(0, 0, 1) };
+const ringDrag = {
+    active: false,
+    axis: null,
+    plane: new THREE.Plane(),
+    center: new THREE.Vector3(),
+    startVec: new THREE.Vector3(),
+    startQuat: new THREE.Quaternion(),
+};
+const ringRaycaster = new THREE.Raycaster();
+const ringHit = new THREE.Vector3();
+const ringCross = new THREE.Vector3();
+const ringQuat = new THREE.Quaternion();
+function ringPlanePoint(pointer) {
+    ringRaycaster.setFromCamera(pointer, camera);
+    return ringRaycaster.ray.intersectPlane(ringDrag.plane, ringHit);
+}
+const originalPointerDown = gizmo.pointerDown.bind(gizmo);
+gizmo.pointerDown = (pointer) => {
+    originalPointerDown(pointer);
+    ringDrag.active = false;
+    if (!gizmo.dragging || !(gizmo.axis in AXIS_VECTORS)) return;
+    ringDrag.axis = AXIS_VECTORS[gizmo.axis];
+    modelPivot.getWorldPosition(ringDrag.center);
+    const toCamera = ringCross.subVectors(camera.position, ringDrag.center).normalize();
+    if (Math.abs(ringDrag.axis.dot(toCamera)) < EDGE_ON_COS) return;
+    ringDrag.plane.setFromNormalAndCoplanarPoint(ringDrag.axis, ringDrag.center);
+    if (!ringPlanePoint(pointer)) return;
+    ringDrag.startVec.subVectors(ringHit, ringDrag.center);
+    ringDrag.startQuat.copy(modelPivot.quaternion);
+    ringDrag.active = true;
+};
+const originalPointerMove = gizmo.pointerMove.bind(gizmo);
+gizmo.pointerMove = (pointer) => {
+    if (!ringDrag.active) return originalPointerMove(pointer);
+    if (!ringPlanePoint(pointer)) return;
+    const current = ringHit.sub(ringDrag.center);
+    const angle = Math.atan2(ringCross.crossVectors(ringDrag.startVec, current).dot(ringDrag.axis), ringDrag.startVec.dot(current));
+    modelPivot.quaternion.copy(ringQuat.setFromAxisAngle(ringDrag.axis, angle)).multiply(ringDrag.startQuat);
+    gizmo.dispatchEvent({ type: 'objectChange' });
+};
+
+const modeButton = document.getElementById('rot-mode');
+modeButton.addEventListener('click', () => {
+    gizmo.enabled = !gizmo.enabled;
+    gizmo.visible = gizmo.enabled;
+    modeButton.textContent = gizmo.enabled ? '모드: 축 회전' : '모드: 자유 회전';
+});
+
+// 패널 숨기기/펼치기 (애니메이션과 아이콘 방향은 CSS의 collapsed 클래스가 담당)
+const help = document.getElementById('controls-help');
+for (const btn of document.querySelectorAll('.toggle-btn')) {
+    if (btn.parentElement === help) continue;
+    btn.addEventListener('click', () => btn.parentElement.classList.toggle('collapsed'));
+}
+
+// 조작 가이드: 접속 시 3초 보여준 뒤 숨김, 버튼으로 다시 열면 3초 뒤 다시 숨김
+const HELP_SHOW_MS = 3000;
+let helpTimer = setTimeout(() => help.classList.add('collapsed'), HELP_SHOW_MS);
+help.querySelector('.toggle-btn').addEventListener('click', () => {
+    clearTimeout(helpTimer);
+    if (help.classList.toggle('collapsed')) return; // 보이던 중에 누르면 바로 숨김
+    helpTimer = setTimeout(() => help.classList.add('collapsed'), HELP_SHOW_MS);
+});
 
 const planeGeometry = new THREE.PlaneGeometry(10, 10); // 아주 넓은 바닥
 const planeMaterial = new THREE.MeshStandardMaterial({ 
@@ -133,7 +291,7 @@ function loadModel(fileName) {
     const seq = ++loadSeq;
     // 기존 모델이 있다면 삭제
     if (currentModel) {
-        scene.remove(currentModel);
+        modelPivot.remove(currentModel);
         disposeModel(currentModel);
         currentModel = null;
     }
@@ -397,7 +555,9 @@ function loadModel(fileName) {
         camera.lookAt(center);
         controls.target.set(0, 0, 0);
         controls.update();
-        scene.add(object);
+        modelPivot.quaternion.identity(); // 새 모델은 기본 방향부터
+        showRotation();
+        modelPivot.add(object);
     }, (xhr) => {
         console.log((xhr.loaded / xhr.total * 100) + '% 로딩 중');
     }, (error) => {

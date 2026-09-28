@@ -1,26 +1,101 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>FBX Web Viewer</title>
     <style>
         body { margin: 0; overflow: hidden; }
         canvas { width: 100%; height: 100%; }
         #info { position: absolute; top: 10px; width: 100%; text-align: center; color: white; }
         #version { font-size: 12px; opacity: 0.7; }
+        /* 화면 위에 겹치는 UI 레이어: 위쪽은 무기 목록, 아래쪽은 하단 바. 서로 영역을 나눠 가져서 겹치지 않음 */
+        #ui {
+            position: fixed;
+            inset: 0;
+            padding: 20px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 20px;
+            pointer-events: none; /* 빈 영역 클릭은 캔버스로 통과 */
+        }
+        #bottom-bar {
+            align-self: stretch;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            pointer-events: none;
+        }
+        #side-panel, #category-bar, #color-picker-container, #rotation-panel { pointer-events: auto; }
+        #rotation-panel {
+            position: absolute; /* #ui 기준 우측 중앙 */
+            right: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 12px;
+            border-radius: 8px;
+            font-family: sans-serif;
+            font-size: 14px;
+        }
+        #rotation-panel label { display: flex; align-items: center; gap: 6px; font-weight: bold; }
+        #rotation-panel input { width: 56px; }
+        #rotation-panel .axis-x { color: #ff5a5a; }
+        #rotation-panel .axis-y { color: #6ee36e; }
+        #rotation-panel .axis-z { color: #5aa0ff; }
         #side-panel {
-            position: absolute;
-            top: 20px;
-            left: 20px;
+            position: relative;
+            display: flex;
+            flex-direction: column;
             width: 200px;
-            max-height: 80vh;
+            min-height: 0; /* 남은 높이보다 길면 줄어들고, 목록만 내부 스크롤 */
             background: rgba(0, 0, 0, 0.7);
             color: white;
             padding: 15px;
             border-radius: 8px;
             font-family: sans-serif;
-            overflow-y: auto;
         }
-        #model-list { list-style: none; padding: 0; }
+        #model-list { list-style: none; padding: 0; overflow-y: auto; min-height: 0; }
+
+        /* 숨기기/펼치기: collapsed면 자기 폭 + 화면 여백(20px)만큼 옆으로 빠지고, 버튼은 패널 바깥 모서리에 붙어서 화면 끝에 남음 */
+        .collapsible { transition: translate 0.3s ease; }
+        .collapsible.left.collapsed { translate: calc(-100% - 20px) 0; }
+        .collapsible.right.collapsed { translate: calc(100% + 20px) 0; }
+        .toggle-btn {
+            position: absolute;
+            top: 10px;
+            width: 24px;
+            height: 44px;
+            padding: 0;
+            border: none;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            pointer-events: auto;
+        }
+        .left .toggle-btn { left: 100%; border-radius: 0 6px 6px 0; }
+        .right .toggle-btn { right: 100%; border-radius: 6px 0 0 6px; }
+        .toggle-btn::before { content: '<'; display: inline-block; transition: transform 0.3s; }
+        .right .toggle-btn::before { content: '>'; }
+        .collapsed .toggle-btn::before { transform: rotate(180deg); }
+
+        /* 터치 기기에서는 마우스 대신 터치 조작 안내 */
+        .guide-touch { display: none; }
+        @media (hover: none) and (pointer: coarse) {
+            .guide-mouse { display: none; }
+            .guide-touch { display: block; }
+        }
         #model-list li {
             padding: 8px;
             cursor: pointer;
@@ -29,9 +104,7 @@
         }
         #model-list li:hover { background: #555; }
         #color-picker-container {
-            position: absolute;
-            bottom: 20px;
-            right: 20px;
+            align-self: flex-end;
             background: rgba(0, 0, 0, 0.7);
             padding: 15px;
             border-radius: 10px;
@@ -50,16 +123,11 @@
             background: none;
         }
 
-        #category-wrapper {
-            position: fixed;
-            bottom: 30px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 100;
-        }
-
         #category-bar {
             display: flex;
+            box-sizing: border-box;
+            max-width: 100%;
+            overflow-x: auto; /* 폭이 모자라면 가로 스크롤 */
             gap: 15px;
             background: rgba(0, 0, 0, 0.6);
             padding: 15px 25px;
@@ -79,6 +147,7 @@
             border: 3px solid white;
             cursor: pointer;
             transition: transform 0.2s, border-color 0.2s;
+            flex-shrink: 0;
         }
 
         .cat-btn:hover {
@@ -126,12 +195,27 @@
 </head>
 <body>
     <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.1</div></div>
-    <div id="side-panel">
-        <h2 id="list-title">무기</h2> 
-        <ul id="model-list"></ul>
-    </div>
-    <div id="category-wrapper">
-        <div id="category-bar"></div>
+    <div id="ui">
+        <div id="side-panel" class="collapsible left">
+            <h2 id="list-title">무기</h2>
+            <ul id="model-list"></ul>
+            <button class="toggle-btn" aria-label="무기 목록 숨기기/펼치기"></button>
+        </div>
+        <div id="bottom-bar">
+            <div id="color-picker-container">
+                <label>잉크 색</label>
+                <input type="color" id="team-color-input" value="#ff00ff">
+            </div>
+            <div id="category-bar"></div>
+        </div>
+        <div id="rotation-panel" class="collapsible right">
+            <button class="toggle-btn" aria-label="회전 패널 숨기기/펼치기"></button>
+            <button id="rot-mode">모드: 자유 회전</button>
+            <label class="axis-x">X <input type="number" id="rot-x" step="1"> °</label>
+            <label class="axis-y">Y <input type="number" id="rot-y" step="1"> °</label>
+            <label class="axis-z">Z <input type="number" id="rot-z" step="1"> °</label>
+            <button id="rot-reset">Reset</button>
+        </div>
     </div>
     <script type="importmap">
       {
@@ -141,19 +225,22 @@
         }
       }
     </script>
-        <div id="controls-help">
+    <div id="controls-help" class="collapsible right">
+        <button class="toggle-btn" aria-label="조작 가이드 보기"></button>
         <h3>🎮 조작 가이드 🎮</h3>
-        <ul>
+        <ul class="guide-mouse">
             <li><strong>회전:</strong> 마우스 왼쪽 클릭 드래그</li>
             <li><strong>이동:</strong> 마우스 오른쪽 클릭 드래그</li>
             <li><strong>확대/축소:</strong> 마우스 휠</li>
             <li><strong>잉크 색상 변경:</strong> 우하단 컬러 피커 활용</li>
         </ul>
+        <ul class="guide-touch">
+            <li><strong>회전:</strong> 한 손가락으로 드래그</li>
+            <li><strong>이동:</strong> 두 손가락으로 드래그</li>
+            <li><strong>확대/축소:</strong> 두 손가락 벌리기/모으기</li>
+            <li><strong>잉크 색상 변경:</strong> 우하단 컬러 피커 활용</li>
+        </ul>
     </div>
     <script type="module" src="main.js"></script>
-    <div id="color-picker-container">
-        <label>잉크 색</label>
-        <input type="color" id="team-color-input" value="#ff00ff">
-    </div>
 </body>
 </html>
