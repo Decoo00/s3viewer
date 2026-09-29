@@ -122,6 +122,7 @@ const rotInputs = ['x', 'y', 'z'].map((axis) => document.getElementById(`rot-${a
 function showRotation() {
     const r = modelPivot.rotation;
     [r.x, r.y, r.z].forEach((rad, i) => {
+        if (rotInputs[i] === document.activeElement) return; // 자동 회전 중에도 입력 중인 칸은 덮어쓰지 않음
         rotInputs[i].value = +THREE.MathUtils.radToDeg(rad).toFixed(1);
     });
 }
@@ -225,6 +226,17 @@ modeButton.addEventListener('click', () => {
     gizmo.enabled = !gizmo.enabled;
     gizmo.visible = gizmo.enabled;
     modeButton.textContent = gizmo.enabled ? '모드: 축 회전' : '모드: 자유 회전';
+});
+
+// 자동 회전: 월드 Y축(화면 위쪽) 기준 턴테이블 회전
+const AUTO_ROTATE_SPEED = Math.PI / 5; // 라디안/초 (10초에 한 바퀴)
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const autoRotateQuat = new THREE.Quaternion();
+let autoRotate = false;
+const autoButton = document.getElementById('rot-auto');
+autoButton.addEventListener('click', () => {
+    autoRotate = !autoRotate;
+    autoButton.textContent = autoRotate ? '자동 회전: 켬' : '자동 회전: 끔';
 });
 
 // 패널 숨기기/펼치기 (애니메이션과 아이콘 방향은 CSS의 collapsed 클래스가 담당)
@@ -332,9 +344,17 @@ function placeModel(object) {
 
 // glb 머티리얼: 텍스처 역할(셰이더 샘플러 이름)은 변환 때 material.userData.s3에 기록됨 (tools/build_glb.py)
 const S3_MAPS = { roughnessMap: '_r0', metalnessMap: '_m0', aoMap: '_ao0', alphaMap: '_op0' };
-async function setupS3Material(material, parser) {
-    const { textures, options } = material.userData.s3;
+// 실제로 쓸 머티리얼을 돌려준다 (유리는 MeshPhysicalMaterial로 바꿈)
+async function setupS3Material(source, parser) {
+    const { textures, options, render_mode } = source.userData.s3;
     const load = (key) => textures[key] ? parser.getDependency('texture', textures[key].index) : null;
+    // 반투명인데 opacity 맵이 없으면 유리 (예: 볼드 마커 계기판). 뒤가 비쳐 보이면서 반사는 그대로 더해지도록 transmission 사용
+    // 돔 모양은 normal map이 표현하고, albedo는 쓰지 않음
+    const isGlass = render_mode === 'translucent' && !textures._op0;
+    const material = isGlass ? new THREE.MeshPhysicalMaterial({
+        name: source.name, transmission: 1, thickness: 0, normalMap: source.normalMap, normalScale: source.normalScale,
+    }) : source;
+    material.userData = source.userData;
     for (const [prop, key] of Object.entries(S3_MAPS)) {
         const tex = await load(key);
         if (tex) material[prop] = tex;
@@ -359,21 +379,26 @@ async function setupS3Material(material, parser) {
         };
     }
     material.needsUpdate = true;
+    return material;
 }
 
 function loadGlb(path) {
     const seq = ++loadSeq;
     clearModel();
     new GLTFLoader().load(path, async (gltf) => {
-        const materials = new Set();
+        const meshes = [];
         gltf.scene.traverse((child) => {
             if (!child.isMesh) return;
             child.castShadow = true;
             child.receiveShadow = true;
             if (child.userData.s3?.hidden) child.visible = false; // 게임에서 기본으로 숨겨진 부품 (붙은 본이 invisible)
-            materials.add(child.material);
+            meshes.push(child);
         });
-        await Promise.all([...materials].map((m) => setupS3Material(m, gltf.parser)));
+        const setups = new Map(); // glTF 머티리얼 → setupS3Material 결과 (메시끼리 공유하는 머티리얼은 한 번만)
+        for (const mesh of meshes) {
+            if (!setups.has(mesh.material)) setups.set(mesh.material, setupS3Material(mesh.material, gltf.parser));
+        }
+        await Promise.all(meshes.map(async (mesh) => { mesh.material = await setups.get(mesh.material); }));
         if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
         placeModel(gltf.scene);
     }, undefined, (error) => console.error('에러 발생:', error));
@@ -650,8 +675,14 @@ colorInput.addEventListener('input', (e) => {
 });
 
 // 5. 애니메이션 루프
+const clock = new THREE.Clock();
 function animate() {
     requestAnimationFrame(animate);
+    const dt = clock.getDelta();
+    if (autoRotate) {
+        modelPivot.quaternion.premultiply(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * dt));
+        showRotation();
+    }
     controls.update(); // 컨트롤러 업데이트
     renderer.render(scene, camera);
 }

@@ -2,7 +2,7 @@
 
 - 컬래버(_CstmNN) 파일이 기본 무기의 텍스처를 참조하면, 그 텍스처를 복사해 넣어서 glb 하나로 완결되게 만든다.
 - bfres 하나에 모델이 여러 개면(예: 우산+케이스, 듀얼 좌우) 모델마다 glb를 따로 만든다.
-- 머티리얼마다 셰이더 샘플러(_a0, _n0, _su0 …) → 텍스처 매핑과 셰이더 옵션을 material.extras.s3에 넣는다.
+- 머티리얼마다 셰이더 샘플러(_a0, _n0, _su0 …) → 텍스처 매핑과 셰이더 옵션, 불투명이 아니면 render mode를 material.extras.s3에 넣는다.
 - 붙은 본이 invisible인 셰이프는 node.extras.s3.hidden = true로 표시한다 (게임에서 기본으로 숨겨진 부품).
 
 usage: python build_glb.py <Model 폴더> <출력 폴더> [파일 패턴, 기본 Wmn_*.bfres.zs]
@@ -40,13 +40,15 @@ def parse_info(text):
 
 
 def parse_mat_info(text):
-    """--mat-info 출력 → {material: {'shader': str, 'samplers': {shader_sampler: mat_sampler}, 'options': {k: v}}}"""
+    """--mat-info 출력 → {material: {'shader': str, 'render_mode': str, 'samplers': {shader_sampler: mat_sampler}, 'options': {k: v}}}"""
     mats, cur = {}, None
     for line in text.splitlines():
         if m := re.match(r'^Texture properties for (\S+):', line):
             cur = mats.setdefault(m.group(1), {'shader': None, 'samplers': {}, 'options': {}})
         elif cur is None:
             continue
+        elif m := re.match(r'^  gsys_render_state_mode: (\S+)', line):
+            cur['render_mode'] = m.group(1)
         elif m := re.match(r'^Shader: (.+)', line):
             cur['shader'] = m.group(1)
         elif (m := re.match(r'^  sampler (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
@@ -157,7 +159,10 @@ def build_file(bfres, out_dir, work):
                 if mat_sampler in mats[name]:
                     tex_name = mats[name][mat_sampler]
                     textures[shader_sampler] = {'index': texture_for(gltf, binary, tex_name, tex_dirs), 'name': tex_name}
-            mat.setdefault('extras', {})['s3'] = {'shader': info['shader'], 'textures': textures, 'options': info['options']}
+            s3 = {'shader': info['shader'], 'textures': textures, 'options': info['options']}
+            if info['render_mode'] != 'opaque':  # translucent(유리, 반투명 로고 등) / mask / custom
+                s3['render_mode'] = info['render_mode']
+            mat.setdefault('extras', {})['s3'] = s3
             # 표준 슬롯도 셰이더 샘플러 기준으로 채운다 (BfrAss는 공유/외부 텍스처일 때 비워둠)
             pbr = mat.setdefault('pbrMetallicRoughness', {})
             pbr.pop('baseColorTexture', None)
