@@ -229,7 +229,8 @@ modeButton.addEventListener('click', () => {
 });
 
 // 자동 회전: 월드 Y축(화면 위쪽) 기준 턴테이블 회전
-const AUTO_ROTATE_SPEED = Math.PI / 5; // 라디안/초 (10초에 한 바퀴)
+const AUTO_ROTATE_SPEED = Math.PI / 5; // 라디안/초 (10초에 한 바퀴), 슬라이더 배율 1일 때
+const speedSlider = document.getElementById('rot-speed'); // 배율 0.66 ~ 4.0
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const autoRotateQuat = new THREE.Quaternion();
 let autoRotate = false;
@@ -237,6 +238,7 @@ const autoButton = document.getElementById('rot-auto');
 autoButton.addEventListener('click', () => {
     autoRotate = !autoRotate;
     autoButton.textContent = autoRotate ? '자동 회전: 켬' : '자동 회전: 끔';
+    speedSlider.parentElement.hidden = !autoRotate; // 속도 슬라이더는 자동 회전 중에만 표시
 });
 
 // 패널 숨기기/펼치기 (애니메이션과 아이콘 방향은 CSS의 collapsed 클래스가 담당)
@@ -337,9 +339,7 @@ function placeModel(object) {
     camera.lookAt(center);
     controls.target.set(0, 0, 0);
     controls.update();
-    modelPivot.quaternion.identity(); // 새 모델은 기본 방향부터
-    showRotation();
-    modelPivot.add(object);
+    modelPivot.add(object); // 회전은 이전 모델 것을 유지
 }
 
 // glb 머티리얼: 텍스처 역할(셰이더 샘플러 이름)은 변환 때 material.userData.s3에 기록됨 (tools/build_glb.py)
@@ -680,7 +680,7 @@ function animate() {
     requestAnimationFrame(animate);
     const dt = clock.getDelta();
     if (autoRotate) {
-        modelPivot.quaternion.premultiply(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * dt));
+        modelPivot.quaternion.premultiply(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * speedSlider.valueAsNumber * dt));
         showRotation();
     }
     controls.update(); // 컨트롤러 업데이트
@@ -922,3 +922,5 @@ weaponData.forEach(cat => {
     };
     categoryBar.appendChild(btn);
 });
+
+loadGlb('glb/Wmn_Shooter_NormalT.glb'); // 첫 화면 기본 모델: 스플랫 슈터
