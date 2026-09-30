@@ -923,4 +923,6 @@ weaponData.forEach(cat => {
     categoryBar.appendChild(btn);
 });
 
-loadGlb('glb/Wmn_Shooter_NormalT.glb'); // 첫 화면 기본 모델: 스플랫 슈터
+// 첫 화면: 슈터 목록을 펼치고 스플랫 슈터를 불러옴
+categoryBar.firstChild.click();
+[...modelList.children].find((li) => li.textContent === '스플랫 슈터').click();
