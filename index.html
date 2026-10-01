@@ -32,6 +32,7 @@
             pointer-events: none;
         }
         #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel { pointer-events: auto; }
+        #light-panel label { display: block; }
         #light-panel { /* 임시 위치: 우측, 회전 패널 위 */
             position: absolute;
             right: 20px;
@@ -225,8 +226,12 @@
                 <select id="light-preset">
                     <option value="default">기본</option>
                     <option value="studio">스튜디오</option>
+                    <option value="esplanade">쇼핑몰</option>
+                    <option value="quarry">채석장</option>
+                    <option value="sunset">바다 노을</option>
                 </select>
             </label>
+            <label>방향 <input type="range" id="light-angle" min="-180" max="180" step="1" value="0"></label>
         </div>
         <div id="rotation-panel" class="collapsible right">
             <button class="toggle-btn" aria-label="회전 패널 숨기기/펼치기"></button>
@@ -242,8 +247,8 @@
     <script type="importmap">
       {
         "imports": {
-          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+          "three": "https://unpkg.com/three@0.186.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.186.0/examples/jsm/"
         }
       }
     </script>

@@ -2,7 +2,8 @@
 
 - 컬래버(_CstmNN) 파일이 기본 무기의 텍스처를 참조하면, 그 텍스처를 복사해 넣어서 glb 하나로 완결되게 만든다.
 - bfres 하나에 모델이 여러 개면(예: 우산+케이스, 듀얼 좌우) 모델마다 glb를 따로 만든다.
-- 머티리얼마다 셰이더 샘플러(_a0, _n0, _su0 …) → 텍스처 매핑과 셰이더 옵션, 불투명이 아니면 render mode를 material.extras.s3에 넣는다.
+- 머티리얼마다 셰이더 샘플러(_a0, _n0, _su0 …) → 텍스처 매핑과 셰이더 옵션을 material.extras.s3에 넣는다.
+  불투명이 아니면 render state(블렌딩, 깊이 쓰기, alpha test)도, 뷰어가 쓰는 파라미터(opacity, emission, manual fresnel)는 params에 넣는다.
 - 붙은 본이 invisible인 셰이프는 node.extras.s3.hidden = true로 표시한다 (게임에서 기본으로 숨겨진 부품).
 
 usage: python build_glb.py <Model 폴더> <출력 폴더> [파일 패턴, 기본 Wmn_*.bfres.zs]
@@ -13,6 +14,8 @@ import zstandard
 
 BFRASS = os.environ.get('BFRASS', 'bfrass')
 DEFAULT = '<Default Value>'
+RENDER_KEYS = {'gsys_render_state_mode', 'gsys_render_state_blend_mode', 'gsys_depth_test_write', 'gsys_alpha_test_enable', 'gsys_alpha_test_value'}
+PARAM_KEYS = {'opacity', 'emission_intensity', 'emission_color', 'manual_fresnel', 'manual_fresnel_color'}
 
 
 def run(*args):
@@ -40,17 +43,19 @@ def parse_info(text):
 
 
 def parse_mat_info(text):
-    """--mat-info 출력 → {material: {'shader': str, 'render_mode': str, 'samplers': {shader_sampler: mat_sampler}, 'options': {k: v}}}"""
+    """--mat-info 출력 → {material: {'shader': str, 'render': {k: str}, 'params': {k: [float]}, 'samplers': {shader_sampler: mat_sampler}, 'options': {k: v}}}"""
     mats, cur = {}, None
     for line in text.splitlines():
         if m := re.match(r'^Texture properties for (\S+):', line):
-            cur = mats.setdefault(m.group(1), {'shader': None, 'samplers': {}, 'options': {}})
+            cur = mats.setdefault(m.group(1), {'shader': None, 'render': {}, 'params': {}, 'samplers': {}, 'options': {}})
         elif cur is None:
             continue
-        elif m := re.match(r'^  gsys_render_state_mode: (\S+)', line):
-            cur['render_mode'] = m.group(1)
+        elif (m := re.match(r'^  (gsys_\w+): (.+)', line)) and m.group(1) in RENDER_KEYS:
+            cur['render'][m.group(1)] = m.group(2)
         elif m := re.match(r'^Shader: (.+)', line):
             cur['shader'] = m.group(1)
+        elif (m := re.match(r'^(\w+): (.+)', line)) and m.group(1) in PARAM_KEYS:
+            cur['params'][m.group(1)] = [float(x) for x in m.group(2).split(', ')]
         elif (m := re.match(r'^  sampler (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
             cur['samplers'][m.group(1)] = m.group(2)
         elif (m := re.match(r'^  option (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
@@ -160,8 +165,24 @@ def build_file(bfres, out_dir, work):
                     tex_name = mats[name][mat_sampler]
                     textures[shader_sampler] = {'index': texture_for(gltf, binary, tex_name, tex_dirs), 'name': tex_name}
             s3 = {'shader': info['shader'], 'textures': textures, 'options': info['options']}
-            if info['render_mode'] != 'opaque':  # translucent(유리, 반투명 로고 등) / mask / custom
-                s3['render_mode'] = info['render_mode']
+            render, params, opts = info['render'], info['params'], info['options']
+            used = {}
+            if render['gsys_render_state_mode'] != 'opaque':  # translucent / mask / custom
+                s3['render'] = {
+                    'mode': render['gsys_render_state_mode'],
+                    'blend': render['gsys_render_state_blend_mode'] != 'none',
+                    'depth_write': render['gsys_depth_test_write'] == 'true',
+                    'alpha_test': float(render['gsys_alpha_test_value']) if render['gsys_alpha_test_enable'] == 'true' else None,
+                }
+                used['opacity'] = params['opacity'][0]
+            if opts.get('enable_emission') == 'True':
+                used['emission_intensity'] = params['emission_intensity'][0]
+                used['emission_color'] = params['emission_color'][:3]
+            if opts.get('enable_manual_fresnel') == 'True':
+                used['manual_fresnel'] = params['manual_fresnel'][0]
+                used['manual_fresnel_color'] = params['manual_fresnel_color'][:3]
+            if used:
+                s3['params'] = used
             mat.setdefault('extras', {})['s3'] = s3
             # 표준 슬롯도 셰이더 샘플러 기준으로 채운다 (BfrAss는 공유/외부 텍스처일 때 비워둠)
             pbr = mat.setdefault('pbrMetallicRoughness', {})
