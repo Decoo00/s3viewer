@@ -918,7 +918,7 @@ const weaponData = [
                 //{name: '스플랫 슈터(적,사이드오더)', file: 'RvSdodr'},
         ]
      },
-    { id: 'Blaster', name: '블래스터', img: 'wpntypes/IconTypeWpn_01.png',
+    { id: 'Blaster', name: '블래스터', img: 'wpntypes/IconTypeWpn_01.png', format: 'glb',
         items: [
             {name: '노바 블래스터', file: 'Short'},
             {name: '네오 노바 블래스터', file: 'Short_Cstm01'},

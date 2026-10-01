@@ -2,6 +2,9 @@
 // skeletal: 본 T/R/S, boneVisibility: 본 보임/숨김, shaderParam: 머티리얼 셰이더 파라미터
 using System.Text.Json;
 using BfresLibrary;
+using HarmonyLib;
+
+BfresFix.Apply();
 
 object Curve(AnimCurve c) => new
 {
@@ -57,3 +60,14 @@ foreach (var anim in res.ShaderParamAnims.Values)
     shaderParam[anim.Name] = new { frameCount = anim.FrameCount, loop = anim.Loop, materials };
 }
 Console.WriteLine(JsonSerializer.Serialize(new { skeletal, boneVisibility, shaderParam }, new JsonSerializerOptions { WriteIndented = true }));
+
+// BfresLibrary 버그 우회: bool 옵션이 0개인 머티리얼은 bit flag 오프셋이 0이라 _optionBitFlags가 null이 되고,
+// SetupOptionBooleans의 ToArray에서 터진다 (예: Wmn_Blaster_LightShort_Cstm01의 M_Sticker_Cstm01). 빈 플래그로 채운다
+static class BfresFix
+{
+    public static void Apply() => new Harmony("s3viewer.bfresfix").Patch(
+        AccessTools.Method("BfresLibrary.Switch.MaterialParserV10+ShaderInfo:SetupOptionBooleans"),
+        prefix: new HarmonyMethod(typeof(BfresFix), nameof(Prefix)));
+
+    static void Prefix(ref long[] ____optionBitFlags) => ____optionBitFlags ??= new long[1];
+}
