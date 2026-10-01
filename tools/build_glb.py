@@ -26,7 +26,13 @@ ROTATE_Y = {'Wmn_Roller_': 90}
 ANIMATIONS = ('Open', 'Close', 'Open_Loop', 'Shot_Long_St', 'Shot_Short_St')
 # 무기군별로 더 넣는 애니메이션. 이름이 다른 무기군과 겹쳐서(블래스터도 Shot이 있음) 무기군을 정해서 넣는다
 # 스피너: 쿠겔 슈라이버 'Deform'(본·tex_mtx1)·'DeformEmm'(발광), 이그재미너 'Shot'(카트리지 보임/숨김 반복)
-ANIMATIONS_BY_PREFIX = {'Wmn_Spinner_': ('Deform', 'DeformEmm', 'Shot')}
+# 차저: 소이 튜버·스퀵 클린 차지 발광 (게임 액터의 AS가 'Charge'로 이 애니메이션을 가리킴. 다른 차저 액터에는 없음),
+#       R-PEN 'Shot'(Bullet 본 반동)·'Bullet'(Bullet01~05 보임/숨김)
+# 블래스터: 'Shot'(본 반동, 라이트·쇼트는 M_Body 발광도), 프리시전 'JumpShot'.
+#         쇼트의 'Wait'·'Wmn_Blaster_Short'(반복)은 넣지 않음: 본 커브가 없고, 발광을 바꾸는 M_Glass는 emission이 꺼져 있고 M_GlassInv는 모델에 없음
+ANIMATIONS_BY_PREFIX = {'Wmn_Spinner_': ('Deform', 'DeformEmm', 'Shot'),
+                        'Wmn_Charger_': ('Wmn_Charger_Keeper_Charge', 'Wmn_Charger_Quick_Charge', 'Shot', 'Bullet'),
+                        'Wmn_Blaster_': ('Shot', 'JumpShot')}
 ANIM_SAMPLES_PER_FRAME = 2  # 게임 커브(cubic)를 이 간격으로 샘플링해서 glTF linear 키로 넣음 (게임 60fps 기준 프레임)
 PARAM_KEYS = {'opacity', 'emission_intensity', 'emission_color', 'manual_fresnel', 'manual_fresnel_color'}
 # 왼손 모델(<모델>_L)이 bfres에 없으면 오른손 모델을 X축(좌우)으로 대칭시켜 만든다. 머뉴버는 양손에 하나씩 드는데 듀얼 스위퍼만 _L이 따로 있음
@@ -58,11 +64,12 @@ def parse_info(text):
 
 
 def parse_mat_info(text):
-    """--mat-info 출력 → {material: {'shader': str, 'render': {k: str}, 'params': {k: [float]}, 'samplers': {shader_sampler: mat_sampler}, 'options': {k: v}}}"""
+    """--mat-info 출력 → {material: {'shader': str, 'render': {k: str}, 'params': {k: [float]}, 'samplers': {shader_sampler: mat_sampler},
+    'attributes': {shader_attribute: vertex_attribute}, 'options': {k: v}}}"""
     mats, cur = {}, None
     for line in text.splitlines():
         if m := re.match(r'^Texture properties for (\S+):', line):
-            cur = mats.setdefault(m.group(1), {'shader': None, 'render': {}, 'params': {}, 'samplers': {}, 'options': {}})
+            cur = mats.setdefault(m.group(1), {'shader': None, 'render': {}, 'params': {}, 'samplers': {}, 'attributes': {}, 'options': {}})
         elif cur is None:
             continue
         elif (m := re.match(r'^  (gsys_\w+): (.+)', line)) and m.group(1) in RENDER_KEYS:
@@ -73,6 +80,8 @@ def parse_mat_info(text):
             cur['params'][m.group(1)] = [float(x) for x in m.group(2).split(', ')]
         elif (m := re.match(r'^  sampler (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
             cur['samplers'][m.group(1)] = m.group(2)
+        elif (m := re.match(r'^  attribute (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
+            cur['attributes'][m.group(1)] = m.group(2)
         elif (m := re.match(r'^  option (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
             cur['options'][m.group(1)] = m.group(2)
     return mats
@@ -290,7 +299,8 @@ def material_param_animations(anims, material, names):
             continue
         frames = sample_frames(anim['frameCount'])
         tracks = [{'param': p['param'], 'target': c['target'], 'times': [f / 60 for f in frames], 'values': [eval_curve(c, f) for f in frames]}
-                  for mat, params in anim['materials'].items() if mat.lower() == material.lower()  # 히어로 슈터는 애니메이션 쪽 이름이 M_body (모델은 M_Body)
+                  # 히어로 슈터는 애니메이션 쪽 이름이 M_body (모델은 M_Body). 컬래버 머티리얼(M_Body_Cstm01 등)은 기본 무기 애니메이션을 그대로 따름 (사용자 확인)
+                  for mat, params in anim['materials'].items() if mat.lower() == re.sub(r'_Cstm\d+$', '', material).lower()
                   for p in params for c in p['curves']]
         if tracks:
             result[name] = {'loop': anim['loop'], 'duration': anim['frameCount'] / 60, 'tracks': tracks}
@@ -368,7 +378,7 @@ def mirror_x(gltf, binary):
                         struct.pack_into('<f', binary, off, -struct.unpack_from('<f', binary, off)[0])
 
 
-def build_file(bfres, out_dir, work):
+def build_file(bfres, out_dir, work, taken):
     stem = os.path.basename(bfres)[:-len('.bfres')]
     base = re.sub(r'_Cstm\d+$', '', stem)
     base_bfres = os.path.join(os.path.dirname(bfres), base + '.bfres')
@@ -424,6 +434,9 @@ def build_file(bfres, out_dir, work):
                     tex_name = mats[name][mat_sampler]
                     textures[shader_sampler] = {'index': texture_for(gltf, binary, tex_name, tex_dirs), 'name': tex_name}
             s3 = {'shader': info['shader'], 'textures': textures, 'options': info['options']}
+            # 셰이더 정점 입력이 이름이 다른 정점 속성을 읽는 경우만 기록 (예: 소이 튜버 M_Body는 셰이더의 _u2 자리에 _u0을 넣음)
+            if remap := {k: v for k, v in info['attributes'].items() if k != v}:
+                s3['attributes'] = remap
             render, params, opts = info['render'], info['params'], info['options']
             used = {}
             if render['gsys_render_state_mode'] != 'opaque':  # translucent / mask / custom
@@ -453,9 +466,11 @@ def build_file(bfres, out_dir, work):
                 pbr['baseColorTexture'] = {'index': textures['_a0']['index']}
             if '_n0' in textures:
                 mat['normalTexture'] = {'index': textures['_n0']['index']}
-        out = os.path.join(out_dir, model + '.glb')
+        # 다른 bfres 파일과 모델 이름이 겹치면 (예: Charger_LongB 안의 모델 이름이 Charger_Long) 파일 이름으로 저장해 덮어쓰지 않게 한다
+        name = stem if model != stem and model in taken else model
+        out = os.path.join(out_dir, name + '.glb')
         write_glb(out, gltf, binary)
-        results.append((model, os.path.getsize(out)))
+        results.append((name, os.path.getsize(out)))
         if model.startswith(MIRROR_L) and not model.endswith('_L') and model + '_L' not in models:
             mirror_x(gltf, binary)
             out = os.path.join(out_dir, model + '_L.glb')
@@ -477,9 +492,10 @@ if __name__ == '__main__':
     for f in names:
         with open(os.path.join(src_dir, f), 'rb') as src:
             open(os.path.join(bfres_dir, f[:-len('.zs')]), 'wb').write(dctx.decompress(src.read()))
+    taken = {f[:-len('.bfres.zs')] for f in os.listdir(src_dir) if f.endswith('.bfres.zs')}
     total = 0
     for f in names:
-        for model, size in build_file(os.path.join(bfres_dir, f[:-len('.zs')]), out_dir, work):
+        for model, size in build_file(os.path.join(bfres_dir, f[:-len('.zs')]), out_dir, work, taken):
             total += size
             print(f'{model}.glb {size // 1024} KB')
     print(f'{len(names)} files, total {total / 2**20:.1f} MB')

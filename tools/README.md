@@ -43,7 +43,7 @@ BFRASS=/path/to/bfrass python tools/build_glb.py <추출한 Model 폴더> glb
     - transmission 파라미터(`transmission_rate`, `transmission_color_backlight`, `scattering_rate`)는 넣지 않는다. 투과광은 검증 후 넣지 않기로 했다 (`Claude Handover/06_roadmap.md` 6.3). 다시 넣으려면 `PARAM_KEYS`와 `used`에 추가하고 해당 glb를 재변환
 - `node.extras.s3.hidden`: 게임에서 기본으로 숨겨진 부품
 - 무기군별 기본 방향 보정(`ROTATE_Y`)은 루트 노드 회전으로 들어간다.
-- `animations`: 게임 스켈레탈 애니메이션 중 `ANIMATIONS`(`Open`, `Close`, `Open_Loop`, `Shot_Long_St`, `Shot_Short_St`)와 무기군별 `ANIMATIONS_BY_PREFIX`(스피너: `Deform`, `DeformEmm`, `Shot`). 커브가 있는 본만, 게임 커브를 프레임당 2번 샘플링한 linear 키, 60fps 기준 시간.
+- `animations`: 게임 스켈레탈 애니메이션 중 `ANIMATIONS`(`Open`, `Close`, `Open_Loop`, `Shot_Long_St`, `Shot_Short_St`)와 무기군별 `ANIMATIONS_BY_PREFIX`(스피너: `Deform`, `DeformEmm`, `Shot`, 블래스터: `Shot`, `JumpShot`). 커브가 있는 본만, 게임 커브를 프레임당 2번 샘플링한 linear 키, 60fps 기준 시간.
 - `node.extras.s3.visibility`: 본 보임/숨김 애니메이션 → 그 본에 붙은 메시의 `{애니메이션: [[초, 보임], ...]}` (예: 와이드 롤러 빨대). 마지막 키 뒤에 애니메이션 끝까지 값을 유지하는 키를 넣는다
 - `material.extras.s3.param_anims`: 셰이더 파라미터 애니메이션 `{애니메이션: {loop, duration, tracks: [{param, target, times, values}]}}`.
   `ANIMATIONS`에 있는 이름과 `_auto`로 끝나는 이름만 (예: 와이드 롤러 헤드 `tex_mtx0`, 히어로 슈터 `emission_intensity`)

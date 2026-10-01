@@ -383,7 +383,11 @@ function updateAnimBar() {
 //   본 + 본 보임/숨김(와이드 롤러 빨대, 소방 FF 튜브) + 셰이더 파라미터(와이드 롤러 헤드 UV)
 // - 반복: 'Open_Loop'(쿠마 롤러 엔진, 기본 꺼짐), 이름이 '_auto'인 셰이더 파라미터 애니메이션(히어로 슈터 발광, 기본 켜짐),
 //   'Shot'(이그재미너 카트리지 보임/숨김, 기본 꺼짐)
-// - 슬라이더(SCRUBS): 'Deform'/'DeformEmm'(쿠겔 슈라이버 본·병 발광). 슬라이더 값이 재생 위치 (게임에서 차지 양으로 움직이는지는 추측)
+// - 한 번 재생(FIRES): 본 애니메이션인 'Shot'(R-PEN Bullet 본 반동, 블래스터 반동 + 라이트·쇼트 M_Body 발광), 'JumpShot'(프리시전 블래스터).
+//   버튼을 누를 때마다 처음부터
+// - 슬라이더(SCRUBS): 'Deform'/'DeformEmm'(쿠겔 슈라이버 본·병 발광), 이름이 '_Charge'인 셰이더 파라미터 애니메이션(소이 튜버·스퀵 클린 차지 발광).
+//   슬라이더 값이 재생 위치 (게임에서 차지 양으로 움직이는지는 추측)
+//   'Bullet'(R-PEN): 프레임 n에서 Bullet01~0n이 보임 (게임 데이터). 그래서 슬라이더 값을 프레임(탄 수 0~5)으로 씀. 게임이 남은 탄 수로 프레임을 정하는지는 추측
 // 양손(머뉴버)이면 모델마다 mixer를 따로 두고 같은 조작을 양쪽에 함께 적용
 let mixers = [];
 const uvProxies = []; // {proxy, material}: tex_mtx0 이동을 proxy.position으로 재생해서 매 프레임 텍스처에 반영
@@ -397,15 +401,21 @@ const LOOP_TOGGLES = [
     { input: document.getElementById('anim-glow'), match: (name) => name.endsWith('_auto'), initial: true },
     { input: document.getElementById('anim-engine'), match: (name) => name === 'Open_Loop', initial: false },
     // 이그재미너 Shot: 게임 데이터는 22프레임까지 카트리지가 바뀌고 72프레임까지 B로 멈춤. 사용자 요청으로 바뀌는 구간만 끊김 없이 반복 (seamless)
-    { input: document.getElementById('anim-shot'), match: (name) => name === 'Shot', initial: false, seamless: true },
+    // 이름이 같은 R-PEN Shot(본 애니메이션)은 FIRES가 맡으므로 보임/숨김 트랙이 있는 클립만
+    { input: document.getElementById('anim-shot'), match: (name, clip) => name === 'Shot' && clip.tracks.some((t) => t.ValueTypeName === 'bool'), initial: false, seamless: true },
+];
+const FIRES = [
+    { button: document.getElementById('fire-button'), match: (name, clip) => name === 'Shot' && clip.tracks.every((t) => t.ValueTypeName !== 'bool') },
+    { button: document.getElementById('jump-fire-button'), match: (name) => name === 'JumpShot' },
 ];
 const SCRUBS = [
-    { input: document.getElementById('anim-charge'), match: (name) => name === 'Deform' || name === 'DeformEmm' },
+    { input: document.getElementById('anim-charge'), match: (name) => name === 'Deform' || name === 'DeformEmm' || name.endsWith('_Charge') },
+    { input: document.getElementById('anim-bullet'), match: (name) => name === 'Bullet', frames: true },
 ];
 const inkToggle = document.getElementById('anim-ink'); // 해제하면 잉크 칠 영역(롤러 헤드 등)이 칠해지지 않은 상태로 보임. 모델을 바꿔도 유지
 const inkPaint = { value: inkToggle.checked ? 1 : 0 }; // 셰이더 uniform
 inkToggle.addEventListener('change', () => { inkPaint.value = inkToggle.checked ? 1 : 0; });
-const animControls = [...SWITCHES.map((sw) => sw.button), inkToggle.parentElement, ...LOOP_TOGGLES.map((t) => t.input.parentElement), ...SCRUBS.map((s) => s.input.parentElement)];
+const animControls = [...SWITCHES.map((sw) => sw.button), ...FIRES.map((f) => f.button), inkToggle.parentElement, ...LOOP_TOGGLES.map((t) => t.input.parentElement), ...SCRUBS.map((s) => s.input.parentElement)];
 const UV_TARGETS = { 16: 'x', 20: 'y' }; // tex_mtx 안의 바이트 오프셋 → 이동 축 (scale x/y, rotate 다음)
 // tex_mtx0은 UV0, tex_mtx1은 UV1 이동 (decompile: 쿠겔 슈라이버 M_Bottle에서 알베도 UV0 × tex_mtx0, emission UV1 × tex_mtx1)
 const UV_CHANNELS = { tex_mtx0: 0, tex_mtx1: 1 };
@@ -461,7 +471,7 @@ function setupAnimations(gltfs) {
         sw.button.hidden = false;
     }
     for (const toggle of LOOP_TOGGLES) {
-        toggle.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => toggle.match(c.name)).map((c) => {
+        toggle.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => toggle.match(c.name, c)).map((c) => {
             if (toggle.seamless) c.duration = seamlessDuration(c);
             return mixers[i].clipAction(c);
         }));
@@ -469,6 +479,14 @@ function setupAnimations(gltfs) {
         toggle.input.checked = toggle.initial;
         toggle.input.parentElement.hidden = false;
         if (toggle.initial) for (const action of toggle.actions) action.play();
+    }
+    for (const fire of FIRES) {
+        fire.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => fire.match(c.name, c)).map((c) => {
+            const action = mixers[i].clipAction(c);
+            action.setLoop(THREE.LoopOnce); // 끝나면 멈추고 원래 자세로 돌아감
+            return action;
+        }));
+        fire.button.hidden = !fire.actions.length;
     }
     for (const scrub of SCRUBS) {
         scrub.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => scrub.match(c.name)).map((c) => mixers[i].clipAction(c)));
@@ -493,11 +511,23 @@ function seamlessDuration(clip) {
     return times.at(-1) + (times.at(-1) - times.at(-2));
 }
 function applyScrub(scrub) {
-    for (const action of scrub.actions) action.time = scrub.input.valueAsNumber * action.getClip().duration;
+    // frames: 슬라이더 값이 프레임 번호. 키 프레임 경계에서 어느 쪽 값인지 애매하지 않게 반 프레임 뒤를 봄
+    for (const action of scrub.actions) action.time = scrub.frames ? (scrub.input.valueAsNumber + 0.5) / 60 : scrub.input.valueAsNumber * action.getClip().duration;
     for (const m of mixers) m.update(0);
     applyUvProxies();
 }
 for (const scrub of SCRUBS) scrub.input.addEventListener('input', () => applyScrub(scrub));
+// R-PEN: 발사할 때마다 탄 수 슬라이더를 1 줄임 (사용자 요청. 게임 데이터의 Shot과 Bullet이 이렇게 연결되는지는 확인 못 함)
+const bulletScrub = SCRUBS.find((s) => s.input.id === 'anim-bullet');
+for (const fire of FIRES) {
+    fire.button.addEventListener('click', () => {
+        for (const action of fire.actions) action.reset().play();
+        if (!bulletScrub.input.parentElement.hidden && bulletScrub.input.valueAsNumber > 0) {
+            bulletScrub.input.value = bulletScrub.input.valueAsNumber - 1;
+            applyScrub(bulletScrub);
+        }
+    });
+}
 for (const toggle of LOOP_TOGGLES) {
     toggle.input.addEventListener('change', () => {
         for (const action of toggle.actions) {
@@ -507,13 +537,14 @@ for (const toggle of LOOP_TOGGLES) {
     });
 }
 
-// tex_mtx 이동 → 그 머티리얼에서 같은 UV를 쓰는 텍스처 offset. UV0이면 Tcl/2cl용 uniform도
+// tex_mtx 이동 → 그 머티리얼에서 같은 UV를 쓰는 텍스처 offset. UV0이면 Tcl/2cl용 uniform도, tex_mtx1이면 Resource 맵용 uniform도
 function applyUvProxies() {
     for (const { proxy, material, channel } of uvProxies) {
         for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'alphaMap', 'emissiveMap']) {
             if (material[key]?.channel === channel) material[key].offset.set(proxy.position.x, proxy.position.y);
         }
         if (channel === 0) material.userData.uvOffset.value.set(proxy.position.x, proxy.position.y);
+        if (channel === 1) material.userData.resUvOffset.value.set(proxy.position.x, proxy.position.y);
     }
 }
 function playSwitch(sw, state, instant = false) {
@@ -578,6 +609,29 @@ async function setupS3Material(material, parser) {
         material.emissive.fromArray(emissionType === '1' || emissionType === '2' ? [1, 1, 1] : params.emission_color);
         material.emissiveIntensity = params.emission_intensity;
     }
+    // calc_color0: replace_color 2면 emission 맵 값 자리에 피연산자 A, B, C를 조합한 값을 씀
+    // decompile 확인: 소이 튜버 M_Body (계산 5, A 3, B 9, C 50) = Emm × 잉크 색 + Resource0, 스퀵 클린 M_Bottle (계산 2, A 3, B 10) = Emm × Resource1
+    //   블래스터 쇼트 M_Body (계산 1, A 50, B 3) = 잉크 색 × Emm + 잉크 색
+    // 피연산자 3: emission 맵, 9/10: Resource0/1 맵, 50: 잉크 색. 계산 1: A × B + A, 2: A × B, 5: A × C + B. 확인한 조합만 쓰고 나머지 머티리얼은 emission 맵 그대로
+    // Resource 맵은 texcoord_select_resN 2일 때 셰이더 정점 입력 _u2 × tex_mtx1로 읽음 (decompile 두 머티리얼 공통)
+    const calc = options.enable_calc_color0 === 'True' && options.blitz_calc_color0_replace_color === '2'
+        ? { type: options.blitz_calc_color0_calc_type, A: options.blitz_calc_color0_A, B: options.blitz_calc_color0_B, C: options.blitz_calc_color0_C } : null;
+    const RES = { 9: 0, 10: 1 }; // 피연산자 → Resource 번호
+    const resIndex = calc ? [calc.A, calc.B, calc.C].map((op) => RES[op]).find((i) => i !== undefined) : undefined;
+    const resMap = resIndex !== undefined && options[`texcoord_select_res${resIndex}`] === '2' ? await load(`_re${resIndex}`) : null;
+    const OPERANDS = { 3: 's3Emm', 9: 's3Res', 10: 's3Res', 50: 'teamColor' };
+    const calcOps = calc && { 1: [calc.A, calc.B], 2: [calc.A, calc.B], 5: [calc.A, calc.B, calc.C] }[calc.type];
+    const calcExpr = !calcOps || !calcOps.every((op) => op in OPERANDS) || (resIndex !== undefined && !resMap) ? null
+        : { 1: `${OPERANDS[calc.A]} * ${OPERANDS[calc.B]} + ${OPERANDS[calc.A]}`, 2: `${OPERANDS[calc.A]} * ${OPERANDS[calc.B]}`, 5: `${OPERANDS[calc.A]} * ${OPERANDS[calc.C]} + ${OPERANDS[calc.B]}` }[calc.type];
+    // normalize_emission (decompile: 블래스터 쇼트 M_Body. 확인한 건 calc_color0 계산 1과 함께 쓰는 이 머티리얼뿐이라 이 조합만. 스트링거 Coop M_Receiver는 미확인이라 그대로)
+    // - emission = Emm × 계산 결과. 기준 색·emission_intensity는 곱하지 않음 (emission_normalize_offset도 더하지만 이 머티리얼은 0)
+    // - 그다음 최종 색 C(조명 + emission)를 N = C × (1 + k × (I / 밝기(C) − 1))로 맞춤. k = clamp(|Emm|), I = emission_intensity.
+    //   I > 1이면 N, 아니면 C와 N을 I로 섞음. 평소(I = 0)엔 C 그대로이고, 발사 때 I가 커지면 Emm 영역의 밝기가 I가 됨
+    const normalize = options.normalize_emission === 'True' && calc?.type === '1' && calcExpr !== null;
+    // 셰이더 _u2 자리에 들어가는 정점 속성: _u0이면 UV0, 아니면 두 번째 UV (스퀵 클린 M_Bottle은 _u2 그대로라 glb의 두 번째 UV)
+    const resUv = (material.userData.s3.attributes?._u2 ?? '_u2') === '_u0' ? 'uv' : 'uv1';
+    material.userData.resMap = { value: resMap };
+    material.userData.resUvOffset = { value: new THREE.Vector2() }; // tex_mtx1 이동 애니메이션
     const tclMap = await load('_su0');
     // 알베도 텍스처를 끈 머티리얼만 전체가 잉크 색 (예: 스플랫 슈터 병). team_color_map_type 3이어도 알베도가 있으면 알베도 그대로 (예: 새싹/단풍 슈터 캡·스티커)
     const fullTeamColor = options.team_color_map_type === '3' && options.enable_albedo_tex === 'False';
@@ -595,19 +649,33 @@ async function setupS3Material(material, parser) {
     // three.js에서 실제 F0로 쓰이는 값은 specularColorBlended (specularColor를 metalness로 섞은 값)
     const f0 = options.enable_manual_fresnel === 'True'
         ? `vec3(${params.manual_fresnel_color.map((c) => (c * params.manual_fresnel).toFixed(4)).join(', ')})` : null;
-    material.customProgramCacheKey = () => [tcl, paint, emissionBase, f0].join('|'); // 기본 키(onBeforeCompile 소스)는 머티리얼마다 같아서 셰이더가 섞일 수 있음
+    material.customProgramCacheKey = () => [tcl, paint, emissionBase, f0, calcExpr, resMap && resUv, normalize].join('|'); // 기본 키(onBeforeCompile 소스)는 머티리얼마다 같아서 셰이더가 섞일 수 있음
     material.onBeforeCompile = (shader) => {
         shader.uniforms.teamColor = { value: teamColor };
         shader.uniforms.tclMap = material.userData.tclMap;
         shader.uniforms.paintMap = material.userData.paintMap;
         shader.uniforms.inkPaint = inkPaint;
         shader.uniforms.s3UvOffset = material.userData.uvOffset;
-        shader.vertexShader = 'uniform vec2 s3UvOffset;\nvarying vec2 vS3Uv;\n' + shader.vertexShader.replace(
-            '#include <uv_vertex>', '#include <uv_vertex>\nvS3Uv = uv + s3UvOffset;');
-        shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nuniform float inkPaint;\nvarying vec2 vS3Uv;\n' + shader.fragmentShader
+        shader.uniforms.resMap = material.userData.resMap;
+        shader.uniforms.s3ResUvOffset = material.userData.resUvOffset;
+        // uv1은 three.js가 두 번째 UV를 쓰는 맵이 있을 때만 선언함
+        shader.vertexShader = '#ifndef USE_UV1\nattribute vec2 uv1;\n#endif\nuniform vec2 s3UvOffset;\nuniform vec2 s3ResUvOffset;\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.vertexShader.replace(
+            '#include <uv_vertex>', `#include <uv_vertex>\nvS3Uv = uv + s3UvOffset;\nvS3ResUv = ${resMap ? resUv : 'uv'} + s3ResUvOffset;`);
+        // 게임은 emission 맵 값을 계산 결과로 바꾼 뒤 기준 색 × emission_intensity를 곱함. three.js의 emissivemap_fragment가 emission 맵을 곱하는 자리를 바꿈
+        const emissive = calcExpr
+            ? `vec3 s3Emm = texture2D(emissiveMap, vEmissiveMapUv).rgb;\nvec3 s3Res = texture2D(resMap, vS3ResUv).rgb;\n`
+                + (normalize ? `totalEmissiveRadiance = s3Emm * (${calcExpr});` : `totalEmissiveRadiance *= (${calcExpr}) * ${emissionBase};`)
+            : `#include <emissivemap_fragment>\ntotalEmissiveRadiance *= ${emissionBase};`;
+        // 밝기 가중치: R 0.298912는 decompile 상수, G·B와 0 나눗셈 방지 값은 상수 버퍼(fp_c1)라 값을 모름. 같은 계열 가중치(0.586611, 0.114478)로 추측
+        // three.js는 emission_intensity를 emissive 색에 곱해서 넘김. 이 머티리얼은 기준 색이 잉크 색이라 emissive 색이 흰색 → emissive.r이 intensity
+        const normalizeCode = normalize ? 'float s3I = emissive.r;\nfloat s3K = clamp(length(s3Emm), 0.0, 1.0);\n'
+            + 'vec3 s3N = outgoingLight * (1.0 + s3K * (s3I / max(dot(outgoingLight, vec3(0.298912, 0.586611, 0.114478)), 1e-4) - 1.0));\n'
+            + 'outgoingLight = s3I > 1.0 ? s3N : mix(outgoingLight, s3N, s3I);\n' : '';
+        shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nuniform sampler2D resMap;\nuniform float inkPaint;\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.fragmentShader
             .replace('#include <map_fragment>',
                 `#include <map_fragment>\nvec3 s3Albedo = diffuseColor.rgb;\ndiffuseColor.rgb = mix(diffuseColor.rgb, teamColor, max(${tcl}, ${paint}));`)
-            .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\ntotalEmissiveRadiance *= ${emissionBase};`)
+            .replace('#include <emissivemap_fragment>', emissive)
+            .replace('#include <opaque_fragment>', `${normalizeCode}#include <opaque_fragment>`)
             .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>\n${f0 ? `material.specularColorBlended = ${f0};` : ''}`);
     };
     material.needsUpdate = true;
@@ -1092,17 +1160,24 @@ const weaponData = [
             {name: '노틸러스 49', file: 'Serein_Cstm01'},
         ]
      },
-    { id: 'Charger', name: '차저', img: 'wpntypes/IconTypeWpn_04.png',
+    { id: 'Charger', name: '차저', img: 'wpntypes/IconTypeWpn_04.png', format: 'glb',
         items: [
             {name: '소이 튜버', file: 'Keeper'},
             {name: '커스텀 소이 튜버', file: 'Keeper_Cstm01'},
             {name: '14식 대나무 총 갑', file: 'Light'},
+            {name: '14식 대나무 총 을', file: 'Light_Cstm01'},
             {name: '리터 4K', file: 'Long'},
-            // {name: 'a', file: 'LongB'}, 
             {name: '커스텀 리터 4K', file: 'Long_Cstm01'},
+            {name: '4K 스코프', file: 'LongScope'},
+            {name: '커스텀 4K 스코프', file: 'LongScope_Cstm01'},
+            // {name: '리터 4K(Splatoon 2)', file: 'LongB'}, 
             {name: '오더 차저 레플리카', file: 'NormalSdodr'},
             {name: '스플랫 차저', file: 'NormalT'},
             {name: '스플랫 차저 컬래버', file: 'NormalT_Cstm01'},
+            {name: '스플랫 차저 FRST', file: 'NormalT_Cstm02'},
+            {name: '스플랫 스코프', file: 'NormalTScope'},
+            {name: '스플랫 스코프 컬래버', file: 'NormalTScope_Cstm01'},
+            {name: '스플랫 스코프 FRST', file: 'NormalTScope_Cstm02'},
             {name: 'R-PEN/5H', file: 'Pencil'},
             {name: 'R-PEN/5B', file: 'Pencil_Cstm01'},
             {name: '스퀵 클린 α', file: 'Quick'},
@@ -1128,7 +1203,7 @@ const weaponData = [
             {name: '와이드 롤러', file: 'Wide'},
             {name: '와이드 롤러 컬래버', file: 'Wide_Cstm01'},
             {name: '플래닛 와이드 롤러', file: 'Wide_Cstm02'},
-            {name: '쿠마 롤러', file: 'Coop'},
+            {name: 'Mr. 베어표 롤러', file: 'Coop'},
         ]
      },
     { id: 'Brush', name: '붓', img: 'wpntypes/IconTypeWpn_06.png',
