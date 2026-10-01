@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- bfres 스켈레탈 애니메이션 덤프. BfresLibrary(KillzXGaming)의 DLL 폴더를 BFRES_LIB_DIR 환경 변수로 지정해서 빌드:
+       BFRES_LIB_DIR=<ShaderLibrary>/ShaderLibrary.CompileTool/Libs/Bfres dotnet build -c Release -o out -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="BfresLibrary"><HintPath>$(BFRES_LIB_DIR)/BfresLibrary.dll</HintPath></Reference>
+    <Reference Include="Syroot.BinaryData"><HintPath>$(BFRES_LIB_DIR)/Syroot.BinaryData.dll</HintPath></Reference>
+    <Reference Include="Syroot.Maths"><HintPath>$(BFRES_LIB_DIR)/Syroot.Maths.dll</HintPath></Reference>
+    <Reference Include="Syroot.NintenTools.NSW.Bntx"><HintPath>$(BFRES_LIB_DIR)/Syroot.NintenTools.NSW.Bntx.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

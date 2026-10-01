@@ -363,7 +363,113 @@ function clearModel() {
         disposeModel(currentModel);
         currentModel = null;
     }
+    if (mixer) {
+        mixer.stopAllAction();
+        mixer.uncacheRoot(mixer.getRoot());
+        mixer = null;
+    }
+    uvProxies.length = 0;
+    animBar.hidden = true;
+    for (const control of animControls) control.hidden = true;
 }
+
+// 모델 애니메이션 (게임 데이터, tools/build_glb.py가 glb에 넣음)
+// - 접기/펴기: 'Open'/'Close' (롤러). 본 + 본 보임/숨김(와이드 롤러 빨대) + 셰이더 파라미터(와이드 롤러 헤드 UV)
+// - 반복: 'Open_Loop'(쿠마 롤러 엔진, 기본 꺼짐), 이름이 '_auto'인 셰이더 파라미터 애니메이션(히어로 슈터 발광, 기본 켜짐)
+let mixer = null;
+let foldActions = null;
+let folded = false;
+const uvProxies = []; // {proxy, material}: tex_mtx0 이동을 proxy.position으로 재생해서 매 프레임 텍스처에 반영
+const animBar = document.getElementById('anim-bar');
+const foldButton = document.getElementById('fold-toggle');
+const LOOP_TOGGLES = [
+    { input: document.getElementById('anim-glow'), match: (name) => name.endsWith('_auto'), initial: true },
+    { input: document.getElementById('anim-engine'), match: (name) => name === 'Open_Loop', initial: false },
+];
+const animControls = [foldButton, ...LOOP_TOGGLES.map((t) => t.input.parentElement)];
+const UV_TARGETS = { 16: 'x', 20: 'y' }; // tex_mtx0 안의 바이트 오프셋 → 이동 축 (scale x/y, rotate 다음)
+
+// glb에 extras로 들어 있는 보임/숨김·셰이더 파라미터 애니메이션을 three.js 트랙으로 만들어 같은 이름의 클립에 붙임
+function buildClips(gltf) {
+    const clips = new Map(gltf.animations.map((clip) => [clip.name, clip]));
+    const clipFor = (name) => clips.get(name) ?? clips.set(name, new THREE.AnimationClip(name, -1, [])).get(name);
+    const materials = new Set();
+    gltf.scene.traverse((obj) => {
+        for (const [name, keys] of Object.entries(obj.userData.s3?.visibility ?? {})) {
+            clipFor(name).tracks.push(new THREE.BooleanKeyframeTrack(`${obj.uuid}.visible`, keys.map((k) => k[0]), keys.map((k) => k[1])));
+        }
+        if (!obj.isMesh || materials.has(obj.material)) return;
+        materials.add(obj.material);
+        for (const [name, anim] of Object.entries(obj.material.userData.s3?.param_anims ?? {})) {
+            for (const track of anim.tracks) {
+                if (track.param === 'emission_intensity') {
+                    clipFor(name).tracks.push(new THREE.NumberKeyframeTrack(`${obj.uuid}.material.emissiveIntensity`, track.times, track.values));
+                } else if (track.param === 'tex_mtx0' && track.target in UV_TARGETS) {
+                    let entry = uvProxies.find((e) => e.material === obj.material);
+                    if (!entry) {
+                        entry = { proxy: new THREE.Object3D(), material: obj.material };
+                        gltf.scene.add(entry.proxy);
+                        uvProxies.push(entry);
+                    }
+                    clipFor(name).tracks.push(new THREE.NumberKeyframeTrack(`${entry.proxy.uuid}.position[${UV_TARGETS[track.target]}]`, track.times, track.values));
+                }
+            }
+        }
+    });
+    for (const clip of clips.values()) clip.resetDuration();
+    return clips;
+}
+
+function setupAnimations(gltf) {
+    mixer = new THREE.AnimationMixer(gltf.scene);
+    const clips = buildClips(gltf);
+    if (clips.has('Open') && clips.has('Close')) {
+        foldActions = { Open: mixer.clipAction(clips.get('Open')), Close: mixer.clipAction(clips.get('Close')) };
+        for (const action of Object.values(foldActions)) {
+            action.setLoop(THREE.LoopOnce);
+            action.clampWhenFinished = true; // 끝 자세 유지
+        }
+        playFold('Open', true); // 펼친 상태(Open의 끝 자세)로 시작
+        foldButton.hidden = false;
+    }
+    for (const toggle of LOOP_TOGGLES) {
+        const clip = [...clips.values()].find((c) => toggle.match(c.name));
+        if (!clip) continue;
+        toggle.action = mixer.clipAction(clip);
+        toggle.input.checked = toggle.initial;
+        toggle.input.parentElement.hidden = false;
+        if (toggle.initial) toggle.action.play();
+    }
+    animBar.hidden = animControls.every((control) => control.hidden);
+}
+for (const toggle of LOOP_TOGGLES) {
+    toggle.input.addEventListener('change', () => {
+        if (toggle.input.checked) toggle.action.play();
+        else toggle.action.stop(); // 멈추면 원래 값으로 돌아감 (mixer가 원래 상태를 복원)
+    });
+}
+
+// tex_mtx0 이동 → 그 머티리얼의 모든 텍스처 offset과 Tcl/2cl용 uniform
+function applyUvProxies() {
+    for (const { proxy, material } of uvProxies) {
+        for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'alphaMap', 'emissiveMap']) {
+            material[key]?.offset.set(proxy.position.x, proxy.position.y);
+        }
+        material.userData.uvOffset.value.set(proxy.position.x, proxy.position.y);
+    }
+}
+function playFold(name, instant = false) {
+    folded = name === 'Close';
+    foldActions[folded ? 'Open' : 'Close'].stop();
+    const action = foldActions[name].reset().play();
+    if (instant) {
+        action.time = action.getClip().duration;
+        mixer.update(0);
+        applyUvProxies();
+    }
+    foldButton.textContent = folded ? '펴기' : '접기';
+}
+foldButton.addEventListener('click', () => playFold(folded ? 'Open' : 'Close'));
 
 // 모델을 중앙에 두고, 크기에 맞춰 카메라 위치 설정
 function placeModel(object) {
@@ -376,7 +482,7 @@ function placeModel(object) {
     const maxDim = Math.max(size.x, size.y, size.z);
     const fov = camera.fov * (Math.PI / 180);
     const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)); // 모델이 화면에 꽉 차는 거리
-    camera.position.set(-2 * cameraZ, cameraZ / 2, cameraZ / 2);
+    camera.position.set(-2 * cameraZ, cameraZ / 2, 0); // 정측면(-X)에서 약간 위
     camera.lookAt(center);
     controls.target.set(0, 0, 0);
     controls.update();
@@ -416,6 +522,7 @@ async function setupS3Material(material, parser) {
     const paintMap = options.blitz_paint_type === '4' ? await load('_cp0') : null;
     material.userData.tclMap = { value: tclMap }; // userData에 둬야 disposeModel이 해제함
     material.userData.paintMap = { value: paintMap };
+    material.userData.uvOffset = { value: new THREE.Vector2() }; // tex_mtx0 이동 애니메이션 (Tcl/2cl 맵용. 나머지 맵은 texture.offset)
     const tcl = tclMap ? 'texture2D(tclMap, vS3Uv).r' : fullTeamColor ? '1.0' : '0.0';
     const paint = paintMap ? 'texture2D(paintMap, vS3Uv).r' : '0.0';
     const emissionBase = { '1': 's3Albedo', '2': 'teamColor' }[emissionType] ?? 'vec3(1.0)';
@@ -428,8 +535,9 @@ async function setupS3Material(material, parser) {
         shader.uniforms.teamColor = { value: teamColor };
         shader.uniforms.tclMap = material.userData.tclMap;
         shader.uniforms.paintMap = material.userData.paintMap;
-        shader.vertexShader = 'varying vec2 vS3Uv;\n' + shader.vertexShader.replace(
-            '#include <uv_vertex>', '#include <uv_vertex>\nvS3Uv = uv;');
+        shader.uniforms.s3UvOffset = material.userData.uvOffset;
+        shader.vertexShader = 'uniform vec2 s3UvOffset;\nvarying vec2 vS3Uv;\n' + shader.vertexShader.replace(
+            '#include <uv_vertex>', '#include <uv_vertex>\nvS3Uv = uv + s3UvOffset;');
         shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nvarying vec2 vS3Uv;\n' + shader.fragmentShader
             .replace('#include <map_fragment>',
                 `#include <map_fragment>\nvec3 s3Albedo = diffuseColor.rgb;\ndiffuseColor.rgb = mix(diffuseColor.rgb, teamColor, max(${tcl}, ${paint}));`)
@@ -453,6 +561,7 @@ function loadGlb(path) {
         });
         await Promise.all([...materials].map((m) => setupS3Material(m, gltf.parser)));
         if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
+        setupAnimations(gltf);
         placeModel(gltf.scene);
     }, undefined, (error) => console.error('에러 발생:', error));
 }
@@ -737,6 +846,10 @@ function animate(timestamp) {
         modelPivot.quaternion.premultiply(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * speedSlider.valueAsNumber * dt));
         showRotation();
     }
+    if (mixer) {
+        mixer.update(dt);
+        applyUvProxies();
+    }
     controls.update(); // 컨트롤러 업데이트
     renderer.render(scene, camera);
 }
@@ -967,6 +1080,7 @@ weaponData.forEach(cat => {
     btn.style.backgroundImage = `url(${cat.img})`;
     
     btn.onclick = () => {
+        for (const other of categoryBar.children) other.classList.toggle('active', other === btn);
         console.log(`${cat.name} 카테고리 선택됨`);
         
         listTitle.textContent = cat.name;

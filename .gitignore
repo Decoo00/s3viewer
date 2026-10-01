@@ -1,3 +1,6 @@
 .vscode/
 Claude outputs/
 *.txt
+tools/fska_dump/bin/
+tools/fska_dump/obj/
+tools/fska_dump/out/

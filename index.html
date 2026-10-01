@@ -31,7 +31,19 @@
             gap: 10px;
             pointer-events: none;
         }
-        #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel { pointer-events: auto; }
+        #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel, #anim-bar { pointer-events: auto; }
+        #anim-bar { /* 임시: 모델 애니메이션 조작 */
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 8px 14px;
+            border-radius: 20px;
+            font-family: sans-serif;
+            font-size: 14px;
+        }
+        #anim-bar[hidden], #anim-bar [hidden] { display: none; }
         #light-panel label { display: block; }
         #light-panel { /* 임시 위치: 우측, 회전 패널 위 */
             position: absolute;
@@ -168,6 +180,14 @@
             transform: scale(1.1) translateY(-5px);
             border-color: #f0fd01; /* 스플래툰 옐로우 */
         }
+        /* 선택 중인 카테고리: 노란 테두리와 빛 번짐을 유지하고 살짝 떠 있게 */
+        .cat-btn.active {
+            transform: translateY(-5px);
+            border-color: #f0fd01;
+            background-color: #4a4a1a;
+            box-shadow: 0 0 0 2px rgba(240, 253, 1, 0.35), 0 0 8px 2px rgba(240, 253, 1, 0.55);
+        }
+        .cat-btn.active:hover { transform: scale(1.1) translateY(-5px); }
 
         #controls-help {
             position: fixed;
@@ -207,7 +227,7 @@
     </style>
 </head>
 <body>
-    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.1</div></div>
+    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.2</div></div>
     <div id="ui">
         <div id="side-panel" class="collapsible left">
             <h2 id="list-title">무기</h2>
@@ -218,6 +238,11 @@
             <div id="color-picker-container">
                 <label>잉크 색</label>
                 <input type="color" id="team-color-input" value="#fedc0c">
+            </div>
+            <div id="anim-bar" hidden>
+                <button id="fold-toggle" hidden>접기</button>
+                <label hidden><input type="checkbox" id="anim-glow"> 발광 효과</label>
+                <label hidden><input type="checkbox" id="anim-engine"> 엔진 동작</label>
             </div>
             <div id="category-bar"></div>
         </div>
