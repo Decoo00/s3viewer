@@ -21,9 +21,9 @@ DEFAULT = '<Default Value>'
 RENDER_KEYS = {'gsys_render_state_mode', 'gsys_render_state_blend_mode', 'gsys_depth_test_write', 'gsys_alpha_test_enable', 'gsys_alpha_test_value'}
 # 무기군별 기본 방향 보정: 수직축(Y) 회전 각도(도). 뷰어 기본 카메라에서 정면이 보이도록 루트 노드에 회전만 넣는다 (정점은 그대로)
 ROTATE_Y = {'Wmn_Roller_': 90}
-# glb에 넣을 애니메이션 (롤러 접기/펴기, 쿠마 롤러 엔진 등). 컬래버 파일은 애니메이션이 없어서 기본 무기 것을 쓴다 (본 구성이 같음)
+# glb에 넣을 애니메이션 (롤러 접기/펴기, 쿠마 롤러 엔진, 소방 FF 사격 모드 전환 등). 컬래버 파일은 애니메이션이 없어서 기본 무기 것을 쓴다 (본 구성이 같음)
 # 셰이더 파라미터 애니메이션은 이 이름들 + 이름이 '_auto'로 끝나는 것(게임이 자동 재생, 예: 히어로 슈터 발광)
-ANIMATIONS = ('Open', 'Close', 'Open_Loop')
+ANIMATIONS = ('Open', 'Close', 'Open_Loop', 'Shot_Long_St', 'Shot_Short_St')
 ANIM_SAMPLES_PER_FRAME = 2  # 게임 커브(cubic)를 이 간격으로 샘플링해서 glTF linear 키로 넣음 (게임 60fps 기준 프레임)
 PARAM_KEYS = {'opacity', 'emission_intensity', 'emission_color', 'manual_fresnel', 'manual_fresnel_color'}
 # 왼손 모델(<모델>_L)이 bfres에 없으면 오른손 모델을 X축(좌우)으로 대칭시켜 만든다. 머뉴버는 양손에 하나씩 드는데 듀얼 스위퍼만 _L이 따로 있음
@@ -289,8 +289,7 @@ def material_param_animations(anims, material):
 
 def mirror_x(gltf, binary):
     """gltf/binary를 X축 대칭으로 바꾼다 (제자리 수정). 정점·노멀·탄젠트 x 반전, 탄젠트 w 반전(bitangent 방향 유지), 삼각형 감기 순서 반전,
-    노드 TRS와 inverse bind matrix는 S·M·S (S = diag(-1, 1, 1))로 바꿔서 스켈레톤도 같은 거울상이 되게 한다."""
-    assert not gltf.get('animations'), 'mirror_x: 애니메이션 대칭은 아직 없음'
+    노드 TRS, 애니메이션 키, inverse bind matrix는 S·M·S (S = diag(-1, 1, 1))로 바꿔서 스켈레톤도 같은 거울상이 되게 한다."""
 
     def view(acc):
         a = gltf['accessors'][acc]
@@ -337,6 +336,17 @@ def mirror_x(gltf, binary):
         node['translation'][0] *= -1
         x, y, z, w = node['rotation']
         node['rotation'] = [x, -y, -z, w]
+    # 애니메이션 키도 노드와 같은 규칙: 이동 x 반전, 회전 쿼터니언 y·z 반전 (출력 accessor는 채널마다 따로 만들어짐)
+    flips = {'translation': [0], 'rotation': [1, 2]}
+    outputs = {}
+    for anim in gltf.get('animations', []):
+        for ch in anim['channels']:
+            path = ch['target']['path']
+            if path in flips:
+                acc = anim['samplers'][ch['sampler']]['output']
+                assert outputs.setdefault(acc, path) == path
+    for acc, path in outputs.items():
+        negate_floats(acc, flips[path])
     for skin in gltf.get('skins', []):
         a, base, stride = view(skin['inverseBindMatrices'])
         assert a['componentType'] == 5126 and a['type'] == 'MAT4' and stride in (None, 64)

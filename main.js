@@ -363,11 +363,11 @@ function clearModel() {
         disposeModel(currentModel);
         currentModel = null;
     }
-    if (mixer) {
-        mixer.stopAllAction();
-        mixer.uncacheRoot(mixer.getRoot());
-        mixer = null;
+    for (const m of mixers) {
+        m.stopAllAction();
+        m.uncacheRoot(m.getRoot());
     }
+    mixers = [];
     uvProxies.length = 0;
     // animBar는 여기서 숨기지 않는다. 로드가 끝날 때 한 번에 갱신해서 로드 중에 바가 깜빡이지 않게
 }
@@ -379,14 +379,18 @@ function updateAnimBar() {
 }
 
 // 모델 애니메이션 (게임 데이터, tools/build_glb.py가 glb에 넣음)
-// - 접기/펴기: 'Open'/'Close' (롤러). 본 + 본 보임/숨김(와이드 롤러 빨대) + 셰이더 파라미터(와이드 롤러 헤드 UV)
+// - 두 상태 전환(SWITCHES): 'Open'/'Close' (롤러 접기/펴기), 'Shot_Long_St'/'Shot_Short_St' (소방 FF 사격 모드).
+//   본 + 본 보임/숨김(와이드 롤러 빨대, 소방 FF 튜브) + 셰이더 파라미터(와이드 롤러 헤드 UV)
 // - 반복: 'Open_Loop'(쿠마 롤러 엔진, 기본 꺼짐), 이름이 '_auto'인 셰이더 파라미터 애니메이션(히어로 슈터 발광, 기본 켜짐)
-let mixer = null;
-let foldActions = null;
-let folded = false;
+// 양손(머뉴버)이면 모델마다 mixer를 따로 두고 같은 조작을 양쪽에 함께 적용
+let mixers = [];
 const uvProxies = []; // {proxy, material}: tex_mtx0 이동을 proxy.position으로 재생해서 매 프레임 텍스처에 반영
 const animBar = document.getElementById('anim-bar');
-const foldButton = document.getElementById('fold-toggle');
+// 버튼을 누르면 반대쪽 클립을 한 번 재생하고 끝 자세를 유지. 첫 클립의 끝 자세로 시작하고, labels[상태]가 버튼 글자
+const SWITCHES = [
+    { button: document.getElementById('fold-toggle'), clips: ['Open', 'Close'], labels: ['접기', '펴기'] },
+    { button: document.getElementById('shot-toggle'), clips: ['Shot_Long_St', 'Shot_Short_St'], labels: ['단거리 모드로', '장거리 모드로'] },
+];
 const LOOP_TOGGLES = [
     { input: document.getElementById('anim-glow'), match: (name) => name.endsWith('_auto'), initial: true },
     { input: document.getElementById('anim-engine'), match: (name) => name === 'Open_Loop', initial: false },
@@ -394,7 +398,7 @@ const LOOP_TOGGLES = [
 const inkToggle = document.getElementById('anim-ink'); // 해제하면 잉크 칠 영역(롤러 헤드 등)이 칠해지지 않은 상태로 보임. 모델을 바꿔도 유지
 const inkPaint = { value: inkToggle.checked ? 1 : 0 }; // 셰이더 uniform
 inkToggle.addEventListener('change', () => { inkPaint.value = inkToggle.checked ? 1 : 0; });
-const animControls = [foldButton, inkToggle.parentElement, ...LOOP_TOGGLES.map((t) => t.input.parentElement)];
+const animControls = [...SWITCHES.map((sw) => sw.button), inkToggle.parentElement, ...LOOP_TOGGLES.map((t) => t.input.parentElement)];
 const UV_TARGETS = { 16: 'x', 20: 'y' }; // tex_mtx0 안의 바이트 오프셋 → 이동 축 (scale x/y, rotate 다음)
 
 // glb에 extras로 들어 있는 보임/숨김·셰이더 파라미터 애니메이션을 three.js 트랙으로 만들어 같은 이름의 클립에 붙임
@@ -428,33 +432,38 @@ function buildClips(gltf) {
     return clips;
 }
 
-function setupAnimations(gltf) {
+function setupAnimations(gltfs) {
     hideAnimControls();
-    mixer = new THREE.AnimationMixer(gltf.scene);
-    const clips = buildClips(gltf);
-    gltf.scene.traverse((obj) => { if (obj.isMesh && obj.material.userData.paintMap?.value) inkToggle.parentElement.hidden = false; }); // 잉크 칠 영역이 있는 모델
-    if (clips.has('Open') && clips.has('Close')) {
-        foldActions = { Open: mixer.clipAction(clips.get('Open')), Close: mixer.clipAction(clips.get('Close')) };
-        for (const action of Object.values(foldActions)) {
+    mixers = gltfs.map((gltf) => new THREE.AnimationMixer(gltf.scene));
+    const clipSets = gltfs.map(buildClips);
+    for (const gltf of gltfs) {
+        gltf.scene.traverse((obj) => { if (obj.isMesh && obj.material.userData.paintMap?.value) inkToggle.parentElement.hidden = false; }); // 잉크 칠 영역이 있는 모델
+    }
+    for (const sw of SWITCHES) {
+        if (!sw.clips.every((name) => clipSets[0].has(name))) continue;
+        sw.actions = sw.clips.map((name) => clipSets.map((clips, i) => {
+            const action = mixers[i].clipAction(clips.get(name));
             action.setLoop(THREE.LoopOnce);
             action.clampWhenFinished = true; // 끝 자세 유지
-        }
-        playFold('Open', true); // 펼친 상태(Open의 끝 자세)로 시작
-        foldButton.hidden = false;
+            return action;
+        }));
+        playSwitch(sw, 0, true);
+        sw.button.hidden = false;
     }
     for (const toggle of LOOP_TOGGLES) {
-        const clip = [...clips.values()].find((c) => toggle.match(c.name));
-        if (!clip) continue;
-        toggle.action = mixer.clipAction(clip);
+        toggle.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => toggle.match(c.name)).map((c) => mixers[i].clipAction(c)));
+        if (!toggle.actions.length) continue;
         toggle.input.checked = toggle.initial;
         toggle.input.parentElement.hidden = false;
-        if (toggle.initial) toggle.action.play();
+        if (toggle.initial) for (const action of toggle.actions) action.play();
     }
 }
 for (const toggle of LOOP_TOGGLES) {
     toggle.input.addEventListener('change', () => {
-        if (toggle.input.checked) toggle.action.play();
-        else toggle.action.stop(); // 멈추면 원래 값으로 돌아감 (mixer가 원래 상태를 복원)
+        for (const action of toggle.actions) {
+            if (toggle.input.checked) action.play();
+            else action.stop(); // 멈추면 원래 값으로 돌아감 (mixer가 원래 상태를 복원)
+        }
     });
 }
 
@@ -467,21 +476,24 @@ function applyUvProxies() {
         material.userData.uvOffset.value.set(proxy.position.x, proxy.position.y);
     }
 }
-function playFold(name, instant = false) {
-    folded = name === 'Close';
-    foldActions[folded ? 'Open' : 'Close'].stop();
-    const action = foldActions[name].reset().play();
+function playSwitch(sw, state, instant = false) {
+    sw.state = state;
+    for (const action of sw.actions[1 - state]) action.stop();
+    for (const action of sw.actions[state]) {
+        action.reset().play();
+        if (instant) action.time = action.getClip().duration;
+    }
     if (instant) {
-        action.time = action.getClip().duration;
-        mixer.update(0);
+        for (const m of mixers) m.update(0);
         applyUvProxies();
     }
-    foldButton.textContent = folded ? '펴기' : '접기';
+    sw.button.textContent = sw.labels[state];
 }
-foldButton.addEventListener('click', () => playFold(folded ? 'Open' : 'Close'));
+for (const sw of SWITCHES) sw.button.addEventListener('click', () => playSwitch(sw, 1 - sw.state));
 
 // 모델을 중앙에 두고, 크기에 맞춰 카메라 위치 설정
-function placeModel(object) {
+// depthPad: 카메라 쪽(-X)으로 튀어나온 만큼 카메라를 더 뒤로 (양손: 카메라 쪽 무기가 한 개일 때보다 가까워지는 만큼)
+function placeModel(object, depthPad = 0) {
     currentModel = object;
     const box = new THREE.Box3().setFromObject(object);
     const size = box.getSize(new THREE.Vector3());
@@ -491,7 +503,7 @@ function placeModel(object) {
     const maxDim = Math.max(size.x, size.y, size.z);
     const fov = camera.fov * (Math.PI / 180);
     const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)); // 모델이 화면에 꽉 차는 거리
-    camera.position.set(-2 * cameraZ, cameraZ / 2, 0); // 정측면(-X)에서 약간 위
+    camera.position.set(-2 * cameraZ - depthPad, cameraZ / 2, 0); // 정측면(-X)에서 약간 위
     camera.lookAt(center);
     controls.target.set(0, 0, 0);
     controls.update();
@@ -566,6 +578,9 @@ async function readGlb(path) {
         child.receiveShadow = true;
         if (child.userData.s3?.hidden) child.visible = false; // 게임에서 기본으로 숨겨진 부품 (붙은 본이 invisible)
         materials.add(child.material);
+        // GLTFLoader는 COLOR_0이 있으면 vertex color를 albedo에 곱하지만, 게임 셰이더는 vertex color를 입력으로 받지 않음
+        // (decompile: 스플랫 머뉴버 M_Body, L3 릴 건 D 스티커). 머뉴버는 값이 거의 0이라 무기가 검게 나왔음
+        child.material.vertexColors = false;
     });
     await Promise.all([...materials].map((m) => setupS3Material(m, gltf.parser)));
     return gltf;
@@ -573,7 +588,8 @@ async function readGlb(path) {
 
 // 양손 무기(머뉴버): 오른손은 <이름>.glb, 왼손은 <이름>_L.glb (게임 모델에 _L이 없으면 변환 때 오른손을 X축 대칭해서 만듦)
 const handSelect = document.getElementById('hand-select');
-animControls.push(handSelect.parentElement);
+const staggerToggle = document.getElementById('hand-stagger'); // 사선 배치 (양손일 때만)
+animControls.push(handSelect.parentElement, staggerToggle.parentElement);
 let lastGlb = null;
 
 async function loadGlb(path, twoHanded = false) {
@@ -585,8 +601,9 @@ async function loadGlb(path, twoHanded = false) {
     try {
         const gltfs = await Promise.all(paths.map(readGlb));
         if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
-        setupAnimations(gltfs[0]); // 양손일 때 애니메이션은 오른손 것만 (머뉴버는 애니메이션이 없음)
+        setupAnimations(gltfs);
         handSelect.parentElement.hidden = !twoHanded;
+        staggerToggle.parentElement.hidden = gltfs.length === 1;
         updateAnimBar();
         if (gltfs.length === 1) {
             placeModel(gltfs[0].scene);
@@ -598,12 +615,22 @@ async function loadGlb(path, twoHanded = false) {
         const shift = box.getSize(new THREE.Vector3()).x * 0.25 + box.max.x;
         right.position.x -= shift;
         left.position.x += shift;
-        placeModel(new THREE.Group().add(right, left));
+        // 무기 한 개일 때 폭 w → 양손 묶음 폭 2.5w. 카메라 쪽 무기 면이 (2.5w - w) / 2만큼 카메라에 가까워짐
+        const width = box.getSize(new THREE.Vector3()).x;
+        placeModel(new THREE.Group().add(right, left), width * 0.75);
+        // 사선 배치: 왼손을 위(+Y)로 높이의 1/4, 앞(+Z, 총구 쪽)으로 길이의 1/10. 보기 위한 값
+        // placeModel 뒤에 옮겨서 카메라 거리·중심은 사선 배치를 안 했을 때와 같게 둠 (체크해도 화면이 멀어지지 않게)
+        if (staggerToggle.checked) {
+            const size = box.getSize(new THREE.Vector3());
+            left.position.y += size.y * 0.25;
+            left.position.z += size.z * 0.1;
+        }
     } catch (error) {
         console.error('에러 발생:', error);
     }
 }
 handSelect.addEventListener('change', () => loadGlb(lastGlb.path, lastGlb.twoHanded));
+staggerToggle.addEventListener('change', () => loadGlb(lastGlb.path, lastGlb.twoHanded));
 
 // 2. 모델을 화면에 띄우는 함수 (FBX, glb로 옮기기 전 무기군용)
 function loadModel(fileName) {
@@ -887,8 +914,8 @@ function animate(timestamp) {
         modelPivot.quaternion.premultiply(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * speedSlider.valueAsNumber * dt));
         showRotation();
     }
-    if (mixer) {
-        mixer.update(dt);
+    if (mixers.length) {
+        for (const m of mixers) m.update(dt);
         applyUvProxies();
     }
     controls.update(); // 컨트롤러 업데이트
@@ -985,14 +1012,18 @@ const weaponData = [
         items: [
             {name: '스플랫 머뉴버', file: 'NormalT'},
             {name: '스플랫 머뉴버 컬래버', file: 'NormalT_Cstm01'},
+            {name: '트윙클 스플랫 머뉴버', file: 'NormalT_Cstm02'},
             {name: '오더 머뉴버 레플리카', file: 'NormalSdodr'},
             {name: '스퍼터리', file: 'Short'},
             {name: '스퍼터리 휴', file: 'Short_Cstm01'},
+            {name: '스퍼터리 OWL', file: 'Short_Cstm02'},
             {name: '블랙 쿼드 호퍼', file: 'Stepper'},
             {name: '화이트 쿼드 호퍼', file: 'Stepper_Cstm01'},
             {name: '소방 FF', file: 'Long'},
+            {name: '커스텀 소방 FF', file: 'Long_Cstm01'},
             {name: '듀얼 스위퍼', file: 'Dual'},
             {name: '커스텀 듀얼 스위퍼', file: 'Dual_Cstm01'},
+            {name: '후프 듀얼 스위퍼', file: 'Dual_Cstm02'},
             {name: '켈빈 525', file: 'Gallon'},
             {name: '켈빈 525 데코', file: 'Gallon_Cstm01'},
             {name: 'Mr. 베어표 머뉴버', file: 'Coop'},
