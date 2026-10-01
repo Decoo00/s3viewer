@@ -369,8 +369,13 @@ function clearModel() {
         mixer = null;
     }
     uvProxies.length = 0;
-    animBar.hidden = true;
+    // animBar는 여기서 숨기지 않는다. 로드가 끝날 때 한 번에 갱신해서 로드 중에 바가 깜빡이지 않게
+}
+function hideAnimControls() {
     for (const control of animControls) control.hidden = true;
+}
+function updateAnimBar() {
+    animBar.hidden = animControls.every((control) => control.hidden);
 }
 
 // 모델 애니메이션 (게임 데이터, tools/build_glb.py가 glb에 넣음)
@@ -386,7 +391,10 @@ const LOOP_TOGGLES = [
     { input: document.getElementById('anim-glow'), match: (name) => name.endsWith('_auto'), initial: true },
     { input: document.getElementById('anim-engine'), match: (name) => name === 'Open_Loop', initial: false },
 ];
-const animControls = [foldButton, ...LOOP_TOGGLES.map((t) => t.input.parentElement)];
+const inkToggle = document.getElementById('anim-ink'); // 해제하면 잉크 칠 영역(롤러 헤드 등)이 칠해지지 않은 상태로 보임. 모델을 바꿔도 유지
+const inkPaint = { value: inkToggle.checked ? 1 : 0 }; // 셰이더 uniform
+inkToggle.addEventListener('change', () => { inkPaint.value = inkToggle.checked ? 1 : 0; });
+const animControls = [foldButton, inkToggle.parentElement, ...LOOP_TOGGLES.map((t) => t.input.parentElement)];
 const UV_TARGETS = { 16: 'x', 20: 'y' }; // tex_mtx0 안의 바이트 오프셋 → 이동 축 (scale x/y, rotate 다음)
 
 // glb에 extras로 들어 있는 보임/숨김·셰이더 파라미터 애니메이션을 three.js 트랙으로 만들어 같은 이름의 클립에 붙임
@@ -421,8 +429,10 @@ function buildClips(gltf) {
 }
 
 function setupAnimations(gltf) {
+    hideAnimControls();
     mixer = new THREE.AnimationMixer(gltf.scene);
     const clips = buildClips(gltf);
+    gltf.scene.traverse((obj) => { if (obj.isMesh && obj.material.userData.paintMap?.value) inkToggle.parentElement.hidden = false; }); // 잉크 칠 영역이 있는 모델
     if (clips.has('Open') && clips.has('Close')) {
         foldActions = { Open: mixer.clipAction(clips.get('Open')), Close: mixer.clipAction(clips.get('Close')) };
         for (const action of Object.values(foldActions)) {
@@ -440,7 +450,6 @@ function setupAnimations(gltf) {
         toggle.input.parentElement.hidden = false;
         if (toggle.initial) toggle.action.play();
     }
-    animBar.hidden = animControls.every((control) => control.hidden);
 }
 for (const toggle of LOOP_TOGGLES) {
     toggle.input.addEventListener('change', () => {
@@ -524,7 +533,7 @@ async function setupS3Material(material, parser) {
     material.userData.paintMap = { value: paintMap };
     material.userData.uvOffset = { value: new THREE.Vector2() }; // tex_mtx0 이동 애니메이션 (Tcl/2cl 맵용. 나머지 맵은 texture.offset)
     const tcl = tclMap ? 'texture2D(tclMap, vS3Uv).r' : fullTeamColor ? '1.0' : '0.0';
-    const paint = paintMap ? 'texture2D(paintMap, vS3Uv).r' : '0.0';
+    const paint = paintMap ? 'texture2D(paintMap, vS3Uv).r * inkPaint' : '0.0';
     const emissionBase = { '1': 's3Albedo', '2': 'teamColor' }[emissionType] ?? 'vec3(1.0)';
     // manual fresnel: 반사율(F0)을 metalness 대신 manual_fresnel × manual_fresnel_color로 고정 (예: 볼드 마커 유리는 1.0이라 거울처럼 반사)
     // three.js에서 실제 F0로 쓰이는 값은 specularColorBlended (specularColor를 metalness로 섞은 값)
@@ -535,10 +544,11 @@ async function setupS3Material(material, parser) {
         shader.uniforms.teamColor = { value: teamColor };
         shader.uniforms.tclMap = material.userData.tclMap;
         shader.uniforms.paintMap = material.userData.paintMap;
+        shader.uniforms.inkPaint = inkPaint;
         shader.uniforms.s3UvOffset = material.userData.uvOffset;
         shader.vertexShader = 'uniform vec2 s3UvOffset;\nvarying vec2 vS3Uv;\n' + shader.vertexShader.replace(
             '#include <uv_vertex>', '#include <uv_vertex>\nvS3Uv = uv + s3UvOffset;');
-        shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nvarying vec2 vS3Uv;\n' + shader.fragmentShader
+        shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nuniform float inkPaint;\nvarying vec2 vS3Uv;\n' + shader.fragmentShader
             .replace('#include <map_fragment>',
                 `#include <map_fragment>\nvec3 s3Albedo = diffuseColor.rgb;\ndiffuseColor.rgb = mix(diffuseColor.rgb, teamColor, max(${tcl}, ${paint}));`)
             .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>\ntotalEmissiveRadiance *= ${emissionBase};`)
@@ -547,29 +557,60 @@ async function setupS3Material(material, parser) {
     material.needsUpdate = true;
 }
 
-function loadGlb(path) {
-    const seq = ++loadSeq;
-    clearModel();
-    new GLTFLoader().load(path, async (gltf) => {
-        const materials = new Set();
-        gltf.scene.traverse((child) => {
-            if (!child.isMesh) return;
-            child.castShadow = true;
-            child.receiveShadow = true;
-            if (child.userData.s3?.hidden) child.visible = false; // 게임에서 기본으로 숨겨진 부품 (붙은 본이 invisible)
-            materials.add(child.material);
-        });
-        await Promise.all([...materials].map((m) => setupS3Material(m, gltf.parser)));
-        if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
-        setupAnimations(gltf);
-        placeModel(gltf.scene);
-    }, undefined, (error) => console.error('에러 발생:', error));
+async function readGlb(path) {
+    const gltf = await new GLTFLoader().loadAsync(path);
+    const materials = new Set();
+    gltf.scene.traverse((child) => {
+        if (!child.isMesh) return;
+        child.castShadow = true;
+        child.receiveShadow = true;
+        if (child.userData.s3?.hidden) child.visible = false; // 게임에서 기본으로 숨겨진 부품 (붙은 본이 invisible)
+        materials.add(child.material);
+    });
+    await Promise.all([...materials].map((m) => setupS3Material(m, gltf.parser)));
+    return gltf;
 }
+
+// 양손 무기(머뉴버): 오른손은 <이름>.glb, 왼손은 <이름>_L.glb (게임 모델에 _L이 없으면 변환 때 오른손을 X축 대칭해서 만듦)
+const handSelect = document.getElementById('hand-select');
+animControls.push(handSelect.parentElement);
+let lastGlb = null;
+
+async function loadGlb(path, twoHanded = false) {
+    const seq = ++loadSeq;
+    lastGlb = { path, twoHanded };
+    clearModel();
+    const hand = twoHanded ? handSelect.value : 'R';
+    const paths = { R: [path], L: [path.replace(/\.glb$/, '_L.glb')], both: [path, path.replace(/\.glb$/, '_L.glb')] }[hand];
+    try {
+        const gltfs = await Promise.all(paths.map(readGlb));
+        if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
+        setupAnimations(gltfs[0]); // 양손일 때 애니메이션은 오른손 것만 (머뉴버는 애니메이션이 없음)
+        handSelect.parentElement.hidden = !twoHanded;
+        updateAnimBar();
+        if (gltfs.length === 1) {
+            placeModel(gltfs[0].scene);
+            return;
+        }
+        // 양손: 대칭면(X = 0)을 사이에 두고 오른손은 -X, 왼손은 +X. 간격은 보기 위한 값 (게임 근거 없음)
+        const [right, left] = gltfs.map((g) => g.scene);
+        const box = new THREE.Box3().setFromObject(right);
+        const shift = box.getSize(new THREE.Vector3()).x * 0.25 + box.max.x;
+        right.position.x -= shift;
+        left.position.x += shift;
+        placeModel(new THREE.Group().add(right, left));
+    } catch (error) {
+        console.error('에러 발생:', error);
+    }
+}
+handSelect.addEventListener('change', () => loadGlb(lastGlb.path, lastGlb.twoHanded));
 
 // 2. 모델을 화면에 띄우는 함수 (FBX, glb로 옮기기 전 무기군용)
 function loadModel(fileName) {
     const seq = ++loadSeq;
     clearModel();
+    hideAnimControls();
+    updateAnimBar();
     const textureLoader = new THREE.TextureLoader();
     const loader = new FBXLoader();
 
@@ -925,18 +966,22 @@ const weaponData = [
             {name: '오더 블래스터 레플리카', file: 'NormalSdodr'},
             {name: '핫 블래스터', file: 'Middle'},
             {name: '커스텀 핫 블래스터', file: 'Middle_Cstm01'},
+            {name: '글림 핫 블래스터', file: 'Middle_Cstm02'},
             {name: '크래시 블래스터', file: 'LightShort'},
             {name: '네오 크래시 블래스터', file: 'LightShort_Cstm01'},
             {name: '래피드 블래스터', file: 'Light'},
             {name: '래피드 블래스터 데코', file: 'Light_Cstm01'},
             {name: '롱 블래스터', file: 'Long'},
+            {name: '커스텀 롱 블래스터', file: 'Long_Cstm01'},
+            {name: 'R 블래스터 엘리트', file: 'LightLong'},
             {name: 'R 블래스터 엘리트 데코', file: 'LightLong_Cstm11'},
+            {name: 'R 블래스터 엘리트 WNTR', file: 'LightLong_Cstm12'},
             {name: 'S-BLAST92', file: 'Precision'},
             {name: 'S-BLAST91', file: 'Precision_Cstm01'},
             {name: 'Mr. 베어표 블래스터', file: 'Coop'},
         ]
      },
-    { id: 'Maneuver', name: '머뉴버(우)', img: 'wpntypes/IconTypeWpn_02.png',
+    { id: 'Maneuver', name: '머뉴버', img: 'wpntypes/IconTypeWpn_02.png', format: 'glb',
         items: [
             {name: '스플랫 머뉴버', file: 'NormalT'},
             {name: '스플랫 머뉴버 컬래버', file: 'NormalT_Cstm01'},
@@ -1089,7 +1134,7 @@ weaponData.forEach(cat => {
             const li = document.createElement('li');
             li.textContent = item.name;
             const name = `Wmn_${cat.id}_${item.file}`;
-            li.onclick = cat.format === 'glb' ? () => loadGlb(`glb/${name}.glb`) : () => loadModel(`${name}/${name}.fbx`);
+            li.onclick = cat.format === 'glb' ? () => loadGlb(`glb/${name}.glb`, cat.id === 'Maneuver') : () => loadModel(`${name}/${name}.fbx`);
             modelList.appendChild(li);
         });
     };

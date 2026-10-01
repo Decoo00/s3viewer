@@ -40,6 +40,7 @@ BFRASS=/path/to/bfrass python tools/build_glb.py <추출한 Model 폴더> glb
   - `shader`: 셰이더 이름
   - `render`: 불투명이 아닐 때만. render state (`mode`, `blend`, `depth_write`, `alpha_test`)
   - `params`: 뷰어가 쓰는 셰이더 파라미터 (`opacity`, `emission_*`, `manual_fresnel*`)
+    - transmission 파라미터(`transmission_rate`, `transmission_color_backlight`, `scattering_rate`)는 넣지 않는다. 투과광은 검증 후 넣지 않기로 했다 (`Claude Handover/06_roadmap.md` 6.3). 다시 넣으려면 `PARAM_KEYS`와 `used`에 추가하고 해당 glb를 재변환
 - `node.extras.s3.hidden`: 게임에서 기본으로 숨겨진 부품
 - 무기군별 기본 방향 보정(`ROTATE_Y`)은 루트 노드 회전으로 들어간다.
 - `animations`: 게임 스켈레탈 애니메이션 중 `ANIMATIONS`(`Open`, `Close`, `Open_Loop`). 커브가 있는 본만, 게임 커브를 프레임당 2번 샘플링한 linear 키, 60fps 기준 시간.

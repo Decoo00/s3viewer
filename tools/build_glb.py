@@ -7,6 +7,7 @@
 - 무기군별 기본 방향 보정(ROTATE_Y)을 루트 노드 회전으로 넣는다.
 - 기본 무기 bfres의 스켈레탈 애니메이션 중 ANIMATIONS(롤러 접기/펴기 등)를 glTF 애니메이션으로 넣는다 (tools/fska_dump 필요).
 - 붙은 본이 invisible인 셰이프는 node.extras.s3.hidden = true로 표시한다 (게임에서 기본으로 숨겨진 부품).
+- MIRROR_L 무기군은 왼손 모델(_L)이 bfres에 없으면 오른손 모델을 X축 대칭시켜 <모델>_L.glb로 만든다.
 
 usage: python build_glb.py <Model 폴더> <출력 폴더> [파일 패턴, 기본 Wmn_*.bfres.zs]
 환경 변수 BFRASS로 bfrass 실행 파일 경로를 지정할 수 있다 (기본: PATH의 bfrass).
@@ -25,6 +26,8 @@ ROTATE_Y = {'Wmn_Roller_': 90}
 ANIMATIONS = ('Open', 'Close', 'Open_Loop')
 ANIM_SAMPLES_PER_FRAME = 2  # 게임 커브(cubic)를 이 간격으로 샘플링해서 glTF linear 키로 넣음 (게임 60fps 기준 프레임)
 PARAM_KEYS = {'opacity', 'emission_intensity', 'emission_color', 'manual_fresnel', 'manual_fresnel_color'}
+# 왼손 모델(<모델>_L)이 bfres에 없으면 오른손 모델을 X축(좌우)으로 대칭시켜 만든다. 머뉴버는 양손에 하나씩 드는데 듀얼 스위퍼만 _L이 따로 있음
+MIRROR_L = ('Wmn_Maneuver_',)
 
 
 def run(*args):
@@ -284,6 +287,67 @@ def material_param_animations(anims, material):
     return result
 
 
+def mirror_x(gltf, binary):
+    """gltf/binary를 X축 대칭으로 바꾼다 (제자리 수정). 정점·노멀·탄젠트 x 반전, 탄젠트 w 반전(bitangent 방향 유지), 삼각형 감기 순서 반전,
+    노드 TRS와 inverse bind matrix는 S·M·S (S = diag(-1, 1, 1))로 바꿔서 스켈레톤도 같은 거울상이 되게 한다."""
+    assert not gltf.get('animations'), 'mirror_x: 애니메이션 대칭은 아직 없음'
+
+    def view(acc):
+        a = gltf['accessors'][acc]
+        v = gltf['bufferViews'][a['bufferView']]
+        return a, v.get('byteOffset', 0) + a.get('byteOffset', 0), v.get('byteStride')
+
+    def negate_floats(acc, comps):
+        a, base, stride = view(acc)
+        assert a['componentType'] == 5126
+        width = {'VEC3': 3, 'VEC4': 4}[a['type']]
+        stride = stride or 4 * width
+        for i in range(a['count']):
+            for c in comps:
+                off = base + i * stride + 4 * c
+                struct.pack_into('<f', binary, off, -struct.unpack_from('<f', binary, off)[0])
+        return a
+
+    positions, normals, tangents, indices = set(), set(), set(), set()
+    for mesh in gltf['meshes']:
+        for p in mesh['primitives']:
+            assert p.get('mode', 4) == 4 and 'targets' not in p and 'indices' in p
+            positions.add(p['attributes']['POSITION'])
+            normals.add(p['attributes'].get('NORMAL'))
+            tangents.add(p['attributes'].get('TANGENT'))
+            indices.add(p['indices'])
+    for acc in positions:
+        a = negate_floats(acc, [0])
+        a['min'][0], a['max'][0] = -a['max'][0], -a['min'][0]
+    for acc in normals - {None}:
+        negate_floats(acc, [0])
+    for acc in tangents - {None}:
+        negate_floats(acc, [0, 3])
+    for acc in indices:
+        a, base, stride = view(acc)
+        fmt, size = {5121: ('B', 1), 5123: ('H', 2), 5125: ('I', 4)}[a['componentType']]
+        assert stride in (None, size) and a['count'] % 3 == 0
+        for t in range(0, a['count'], 3):
+            o1, o2 = base + (t + 1) * size, base + (t + 2) * size
+            i1, i2 = struct.unpack_from('<' + fmt, binary, o1)[0], struct.unpack_from('<' + fmt, binary, o2)[0]
+            struct.pack_into('<' + fmt, binary, o1, i2)
+            struct.pack_into('<' + fmt, binary, o2, i1)
+
+    for node in gltf['nodes']:
+        node['translation'][0] *= -1
+        x, y, z, w = node['rotation']
+        node['rotation'] = [x, -y, -z, w]
+    for skin in gltf.get('skins', []):
+        a, base, stride = view(skin['inverseBindMatrices'])
+        assert a['componentType'] == 5126 and a['type'] == 'MAT4' and stride in (None, 64)
+        for i in range(a['count']):
+            for col in range(4):
+                for row in range(4):
+                    if (row == 0) != (col == 0):
+                        off = base + 64 * i + 4 * (col * 4 + row)
+                        struct.pack_into('<f', binary, off, -struct.unpack_from('<f', binary, off)[0])
+
+
 def build_file(bfres, out_dir, work):
     stem = os.path.basename(bfres)[:-len('.bfres')]
     base = re.sub(r'_Cstm\d+$', '', stem)
@@ -371,6 +435,11 @@ def build_file(bfres, out_dir, work):
         out = os.path.join(out_dir, model + '.glb')
         write_glb(out, gltf, binary)
         results.append((model, os.path.getsize(out)))
+        if model.startswith(MIRROR_L) and not model.endswith('_L') and model + '_L' not in models:
+            mirror_x(gltf, binary)
+            out = os.path.join(out_dir, model + '_L.glb')
+            write_glb(out, gltf, binary)
+            results.append((model + '_L', os.path.getsize(out)))
     return results
 
 
