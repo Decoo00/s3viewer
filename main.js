@@ -381,7 +381,9 @@ function updateAnimBar() {
 // 모델 애니메이션 (게임 데이터, tools/build_glb.py가 glb에 넣음)
 // - 두 상태 전환(SWITCHES): 'Open'/'Close' (롤러 접기/펴기), 'Shot_Long_St'/'Shot_Short_St' (소방 FF 사격 모드).
 //   본 + 본 보임/숨김(와이드 롤러 빨대, 소방 FF 튜브) + 셰이더 파라미터(와이드 롤러 헤드 UV)
-// - 반복: 'Open_Loop'(쿠마 롤러 엔진, 기본 꺼짐), 이름이 '_auto'인 셰이더 파라미터 애니메이션(히어로 슈터 발광, 기본 켜짐)
+// - 반복: 'Open_Loop'(쿠마 롤러 엔진, 기본 꺼짐), 이름이 '_auto'인 셰이더 파라미터 애니메이션(히어로 슈터 발광, 기본 켜짐),
+//   'Shot'(이그재미너 카트리지 보임/숨김, 기본 꺼짐)
+// - 슬라이더(SCRUBS): 'Deform'/'DeformEmm'(쿠겔 슈라이버 본·병 발광). 슬라이더 값이 재생 위치 (게임에서 차지 양으로 움직이는지는 추측)
 // 양손(머뉴버)이면 모델마다 mixer를 따로 두고 같은 조작을 양쪽에 함께 적용
 let mixers = [];
 const uvProxies = []; // {proxy, material}: tex_mtx0 이동을 proxy.position으로 재생해서 매 프레임 텍스처에 반영
@@ -394,12 +396,19 @@ const SWITCHES = [
 const LOOP_TOGGLES = [
     { input: document.getElementById('anim-glow'), match: (name) => name.endsWith('_auto'), initial: true },
     { input: document.getElementById('anim-engine'), match: (name) => name === 'Open_Loop', initial: false },
+    // 이그재미너 Shot: 게임 데이터는 22프레임까지 카트리지가 바뀌고 72프레임까지 B로 멈춤. 사용자 요청으로 바뀌는 구간만 끊김 없이 반복 (seamless)
+    { input: document.getElementById('anim-shot'), match: (name) => name === 'Shot', initial: false, seamless: true },
+];
+const SCRUBS = [
+    { input: document.getElementById('anim-charge'), match: (name) => name === 'Deform' || name === 'DeformEmm' },
 ];
 const inkToggle = document.getElementById('anim-ink'); // 해제하면 잉크 칠 영역(롤러 헤드 등)이 칠해지지 않은 상태로 보임. 모델을 바꿔도 유지
 const inkPaint = { value: inkToggle.checked ? 1 : 0 }; // 셰이더 uniform
 inkToggle.addEventListener('change', () => { inkPaint.value = inkToggle.checked ? 1 : 0; });
-const animControls = [...SWITCHES.map((sw) => sw.button), inkToggle.parentElement, ...LOOP_TOGGLES.map((t) => t.input.parentElement)];
-const UV_TARGETS = { 16: 'x', 20: 'y' }; // tex_mtx0 안의 바이트 오프셋 → 이동 축 (scale x/y, rotate 다음)
+const animControls = [...SWITCHES.map((sw) => sw.button), inkToggle.parentElement, ...LOOP_TOGGLES.map((t) => t.input.parentElement), ...SCRUBS.map((s) => s.input.parentElement)];
+const UV_TARGETS = { 16: 'x', 20: 'y' }; // tex_mtx 안의 바이트 오프셋 → 이동 축 (scale x/y, rotate 다음)
+// tex_mtx0은 UV0, tex_mtx1은 UV1 이동 (decompile: 쿠겔 슈라이버 M_Bottle에서 알베도 UV0 × tex_mtx0, emission UV1 × tex_mtx1)
+const UV_CHANNELS = { tex_mtx0: 0, tex_mtx1: 1 };
 
 // glb에 extras로 들어 있는 보임/숨김·셰이더 파라미터 애니메이션을 three.js 트랙으로 만들어 같은 이름의 클립에 붙임
 function buildClips(gltf) {
@@ -416,10 +425,11 @@ function buildClips(gltf) {
             for (const track of anim.tracks) {
                 if (track.param === 'emission_intensity') {
                     clipFor(name).tracks.push(new THREE.NumberKeyframeTrack(`${obj.uuid}.material.emissiveIntensity`, track.times, track.values));
-                } else if (track.param === 'tex_mtx0' && track.target in UV_TARGETS) {
-                    let entry = uvProxies.find((e) => e.material === obj.material);
+                } else if (track.param in UV_CHANNELS && track.target in UV_TARGETS) {
+                    const channel = UV_CHANNELS[track.param];
+                    let entry = uvProxies.find((e) => e.material === obj.material && e.channel === channel);
                     if (!entry) {
-                        entry = { proxy: new THREE.Object3D(), material: obj.material };
+                        entry = { proxy: new THREE.Object3D(), material: obj.material, channel };
                         gltf.scene.add(entry.proxy);
                         uvProxies.push(entry);
                     }
@@ -451,13 +461,43 @@ function setupAnimations(gltfs) {
         sw.button.hidden = false;
     }
     for (const toggle of LOOP_TOGGLES) {
-        toggle.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => toggle.match(c.name)).map((c) => mixers[i].clipAction(c)));
+        toggle.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => toggle.match(c.name)).map((c) => {
+            if (toggle.seamless) c.duration = seamlessDuration(c);
+            return mixers[i].clipAction(c);
+        }));
         if (!toggle.actions.length) continue;
         toggle.input.checked = toggle.initial;
         toggle.input.parentElement.hidden = false;
         if (toggle.initial) for (const action of toggle.actions) action.play();
     }
+    for (const scrub of SCRUBS) {
+        scrub.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => scrub.match(c.name)).map((c) => mixers[i].clipAction(c)));
+        if (!scrub.actions.length) continue;
+        for (const action of scrub.actions) {
+            action.play();
+            action.paused = true; // 재생하지 않고 슬라이더 위치에 고정
+        }
+        scrub.input.value = 0;
+        applyScrub(scrub);
+        scrub.input.parentElement.hidden = false;
+    }
 }
+// 보임/숨김 반복 클립에서 값이 바뀌는 구간만: 마지막으로 바뀐 시각 + 그 직전 간격 (이그재미너 Shot: 22 + 2 = 24프레임, 6프레임 주기 4번)
+function seamlessDuration(clip) {
+    const changes = new Set();
+    for (const track of clip.tracks) {
+        for (let k = 1; k < track.times.length; k++) if (track.values[k] !== track.values[k - 1]) changes.add(track.times[k]);
+    }
+    const times = [0, ...changes].sort((a, b) => a - b);
+    if (times.length < 2) return clip.duration;
+    return times.at(-1) + (times.at(-1) - times.at(-2));
+}
+function applyScrub(scrub) {
+    for (const action of scrub.actions) action.time = scrub.input.valueAsNumber * action.getClip().duration;
+    for (const m of mixers) m.update(0);
+    applyUvProxies();
+}
+for (const scrub of SCRUBS) scrub.input.addEventListener('input', () => applyScrub(scrub));
 for (const toggle of LOOP_TOGGLES) {
     toggle.input.addEventListener('change', () => {
         for (const action of toggle.actions) {
@@ -467,13 +507,13 @@ for (const toggle of LOOP_TOGGLES) {
     });
 }
 
-// tex_mtx0 이동 → 그 머티리얼의 모든 텍스처 offset과 Tcl/2cl용 uniform
+// tex_mtx 이동 → 그 머티리얼에서 같은 UV를 쓰는 텍스처 offset. UV0이면 Tcl/2cl용 uniform도
 function applyUvProxies() {
-    for (const { proxy, material } of uvProxies) {
+    for (const { proxy, material, channel } of uvProxies) {
         for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'alphaMap', 'emissiveMap']) {
-            material[key]?.offset.set(proxy.position.x, proxy.position.y);
+            if (material[key]?.channel === channel) material[key].offset.set(proxy.position.x, proxy.position.y);
         }
-        material.userData.uvOffset.value.set(proxy.position.x, proxy.position.y);
+        if (channel === 0) material.userData.uvOffset.value.set(proxy.position.x, proxy.position.y);
     }
 }
 function playSwitch(sw, state, instant = false) {
@@ -532,6 +572,8 @@ async function setupS3Material(material, parser) {
     }
     // emission = 기준 색 × emission 맵 × emission_intensity. 기준 색은 emission_color_type 1: 알베도, 2: 잉크 색, 그 외: emission_color
     const emissionType = options.enable_emission === 'True' ? (options.emission_color_type ?? '0') : null;
+    // emission 맵을 두 번째 UV로 읽음 (decompile: 쿠겔 슈라이버 M_Bottle의 cTexEmission은 UV0이 아닌 다른 정점 UV를 읽음)
+    if (options.texcoord_select_emmmap === '2' && material.emissiveMap) material.emissiveMap.channel = 1;
     if (emissionType !== null) {
         material.emissive.fromArray(emissionType === '1' || emissionType === '2' ? [1, 1, 1] : params.emission_color);
         material.emissiveIntensity = params.emission_intensity;
@@ -540,7 +582,9 @@ async function setupS3Material(material, parser) {
     // 알베도 텍스처를 끈 머티리얼만 전체가 잉크 색 (예: 스플랫 슈터 병). team_color_map_type 3이어도 알베도가 있으면 알베도 그대로 (예: 새싹/단풍 슈터 캡·스티커)
     const fullTeamColor = options.team_color_map_type === '3' && options.enable_albedo_tex === 'False';
     // 잉크가 묻는 표면 (롤러 헤드, 붓 털 등): 2cl 맵의 흰 영역이 잉크로 덮여서 잉크 색이 됨
-    const paintMap = options.blitz_paint_type === '4' ? await load('_cp0') : null;
+    // decompile: 칠 양 = clamp(2cl + 칠 세기 − 1). 칠 세기 자리의 bfres 값은 롤러와 노틸러스 모두 0이라 게임 코드가 채우는 것으로 보임.
+    // 그래서 무기 자체에 늘 잉크가 묻어 있는 enable_private_paint_thickness 머티리얼만 칠함 (노틸러스 몸통은 2cl이 전부 흰색이지만 이 옵션이 없고, 게임에서도 칠해져 있지 않음)
+    const paintMap = options.blitz_paint_type === '4' && options.enable_private_paint_thickness === 'True' ? await load('_cp0') : null;
     material.userData.tclMap = { value: tclMap }; // userData에 둬야 disposeModel이 해제함
     material.userData.paintMap = { value: paintMap };
     material.userData.uvOffset = { value: new THREE.Vector2() }; // tex_mtx0 이동 애니메이션 (Tcl/2cl 맵용. 나머지 맵은 texture.offset)
@@ -1029,7 +1073,7 @@ const weaponData = [
             {name: 'Mr. 베어표 머뉴버', file: 'Coop'},
         ]
     },
-    { id: 'Spinner', name: '스피너', img: 'wpntypes/IconTypeWpn_03.png',
+    { id: 'Spinner', name: '스피너', img: 'wpntypes/IconTypeWpn_03.png', format: 'glb',
         items: [
             {name: '배럴 스피너', file: 'StandardT'},
             {name: '배럴 스피너 데코', file: 'StandardT_Cstm01'},
@@ -1037,9 +1081,13 @@ const weaponData = [
             {name: '쿠겔 슈라이버', file: 'Downpour'},
             {name: '쿠겔 슈라이버 휴', file: 'Downpour_Cstm01'},
             {name: '이그재미너', file: 'HyperShort'},
+            {name: '이그재미너 휴', file: 'HyperShort_Cstm01'},
             {name: '하이드런트', file: 'HyperT'},
+            {name: '커스텀 하이드런트', file: 'HyperT_Cstm01'},
+            {name: '토렌트 하이드런트', file: 'HyperT_Cstm02'},
             {name: '스플랫 스피너', file: 'QuickT'},
             {name: '스플랫 스피너 컬래버', file: 'QuickT_Cstm01'},
+            {name: '스플랫 스피너 PYTN', file: 'QuickT_Cstm02'},
             {name: '노틸러스 47', file: 'Serein'},
             {name: '노틸러스 49', file: 'Serein_Cstm01'},
         ]

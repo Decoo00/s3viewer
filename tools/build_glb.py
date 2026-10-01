@@ -24,6 +24,9 @@ ROTATE_Y = {'Wmn_Roller_': 90}
 # glb에 넣을 애니메이션 (롤러 접기/펴기, 쿠마 롤러 엔진, 소방 FF 사격 모드 전환 등). 컬래버 파일은 애니메이션이 없어서 기본 무기 것을 쓴다 (본 구성이 같음)
 # 셰이더 파라미터 애니메이션은 이 이름들 + 이름이 '_auto'로 끝나는 것(게임이 자동 재생, 예: 히어로 슈터 발광)
 ANIMATIONS = ('Open', 'Close', 'Open_Loop', 'Shot_Long_St', 'Shot_Short_St')
+# 무기군별로 더 넣는 애니메이션. 이름이 다른 무기군과 겹쳐서(블래스터도 Shot이 있음) 무기군을 정해서 넣는다
+# 스피너: 쿠겔 슈라이버 'Deform'(본·tex_mtx1)·'DeformEmm'(발광), 이그재미너 'Shot'(카트리지 보임/숨김 반복)
+ANIMATIONS_BY_PREFIX = {'Wmn_Spinner_': ('Deform', 'DeformEmm', 'Shot')}
 ANIM_SAMPLES_PER_FRAME = 2  # 게임 커브(cubic)를 이 간격으로 샘플링해서 glTF linear 키로 넣음 (게임 60fps 기준 프레임)
 PARAM_KEYS = {'opacity', 'emission_intensity', 'emission_color', 'manual_fresnel', 'manual_fresnel_color'}
 # 왼손 모델(<모델>_L)이 bfres에 없으면 오른손 모델을 X축(좌우)으로 대칭시켜 만든다. 머뉴버는 양손에 하나씩 드는데 듀얼 스위퍼만 _L이 따로 있음
@@ -220,11 +223,15 @@ def sample_frames(frame_count):
     return [i / ANIM_SAMPLES_PER_FRAME for i in range(int(frame_count * ANIM_SAMPLES_PER_FRAME) + 1)]
 
 
-def add_animations(gltf, binary, anims):
+def animation_names(stem):
+    return ANIMATIONS + next((v for prefix, v in ANIMATIONS_BY_PREFIX.items() if stem.startswith(prefix)), ())
+
+
+def add_animations(gltf, binary, anims, names):
     """게임 스켈레탈 애니메이션을 glTF 애니메이션으로. 커브가 있는 본만 넣고(여러 애니메이션을 동시에 재생해도 서로 덮어쓰지 않게),
     그 본의 T/R/S는 커브가 없는 성분도 애니메이션 기준값으로 채운다 (기준값이 바인드 자세와 조금 다를 수 있음)"""
     joints = {node['name']: i for i, node in enumerate(gltf['nodes']) if 'mesh' not in node}
-    for name in ANIMATIONS:
+    for name in names:
         anim = anims['skeletal'].get(name)
         if anim is None:
             continue
@@ -257,26 +264,29 @@ def add_animations(gltf, binary, anims):
         gltf.setdefault('animations', []).append({'name': name, 'channels': channels, 'samplers': samplers})
 
 
-def add_visibility_animations(gltf, anims, shape_bones):
+def add_visibility_animations(gltf, anims, shape_bones, names):
     """본 보임/숨김 애니메이션 → 그 본에 붙은 메시 노드의 extras.s3.visibility[애니메이션] = [[초, 보임], ...]
-    (glTF에는 보임/숨김 애니메이션이 없어서 뷰어가 재생 시 트랙으로 만든다. 예: 와이드 롤러를 접으면 빨대가 바뀜)"""
-    for name in ANIMATIONS:
+    (glTF에는 보임/숨김 애니메이션이 없어서 뷰어가 재생 시 트랙으로 만든다. 예: 와이드 롤러를 접으면 빨대가 바뀜)
+    마지막 키 뒤에 애니메이션 끝(frameCount)까지 값을 유지하는 키를 넣는다. 반복 재생할 때 길이가 게임과 같게 (예: 이그재미너 Shot은 22프레임까지만 키가 있고 길이는 72)"""
+    for name in names:
         anim = anims['boneVisibility'].get(name)
         if anim is None:
             continue
         for curve in anim['curves']:
             keys = [[f / 60, v] for f, v in zip(curve['frames'], curve['values'])]
+            if curve['frames'][-1] < anim['frameCount']:
+                keys.append([anim['frameCount'] / 60, curve['values'][-1]])
             for node in gltf['nodes']:
                 if 'mesh' in node and shape_bones[node['name']] == curve['bone']:
                     node.setdefault('extras', {}).setdefault('s3', {}).setdefault('visibility', {})[name] = keys
 
 
-def material_param_animations(anims, material):
+def material_param_animations(anims, material, names):
     """머티리얼의 셰이더 파라미터 애니메이션 → {애니메이션: {loop, duration, tracks: [{param, target, times, values}]}}
     target은 파라미터 안의 바이트 오프셋 (예: emission_intensity 0, tex_mtx0의 이동 X 16)"""
     result = {}
     for name, anim in anims['shaderParam'].items():
-        if name not in ANIMATIONS and not name.endswith('_auto'):
+        if name not in names and not name.endswith('_auto'):
             continue
         frames = sample_frames(anim['frameCount'])
         tracks = [{'param': p['param'], 'target': c['target'], 'times': [f / 60 for f in frames], 'values': [eval_curve(c, f) for f in frames]}
@@ -374,6 +384,7 @@ def build_file(bfres, out_dir, work):
         extra = ['--textures', base_bfres]
 
     anims = load_animations(bfres)
+    names = animation_names(stem)
     if base != stem and not any(anims.values()):
         anims = load_animations(base_bfres)
 
@@ -399,8 +410,8 @@ def build_file(bfres, out_dir, work):
             node.setdefault('translation', [0, 0, 0])
             node.setdefault('rotation', [0, 0, 0, 1])
             node.setdefault('scale', [1, 1, 1])
-        add_animations(gltf, binary, anims)
-        add_visibility_animations(gltf, anims, shape_bones)
+        add_animations(gltf, binary, anims, names)
+        add_visibility_animations(gltf, anims, shape_bones, names)
         for node in gltf['nodes']:
             if 'mesh' in node and not shapes[node['name']][0]:
                 node.setdefault('extras', {}).setdefault('s3', {})['hidden'] = True
@@ -431,7 +442,7 @@ def build_file(bfres, out_dir, work):
                 used['manual_fresnel_color'] = params['manual_fresnel_color'][:3]
             if used:
                 s3['params'] = used
-            if param_anims := material_param_animations(anims, name):
+            if param_anims := material_param_animations(anims, name, names):
                 s3['param_anims'] = param_anims
             mat.setdefault('extras', {})['s3'] = s3
             # 표준 슬롯도 셰이더 샘플러 기준으로 채운다 (BfrAss는 공유/외부 텍스처일 때 비워둠)
