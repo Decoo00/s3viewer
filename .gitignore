@@ -1,6 +1,9 @@
 .vscode/
 Claude outputs/
+Claude Handover/
 *.txt
 tools/fska_dump/bin/
 tools/fska_dump/obj/
 tools/fska_dump/out/
+tools/cloud_toolkit/*.part*
+
