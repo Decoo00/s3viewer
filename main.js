@@ -39,18 +39,147 @@ scene.add(hemiLight);
 
 const dirLight = new THREE.DirectionalLight(0xffffff, 4);
 dirLight.position.set(1, 2, 1);
-dirLight.castShadow = true;
 // 그림자 범위 설정 (모델 크기에 맞춰 조정 필요)
-dirLight.shadow.camera.left = -1;
-dirLight.shadow.camera.right = 1;
-dirLight.shadow.camera.top = 1;
-dirLight.shadow.camera.bottom = -1;
-dirLight.shadow.mapSize.width = 2048; // 그림자 해상도
-dirLight.shadow.mapSize.height = 2048;
-dirLight.shadow.camera.near = 0.001;
-dirLight.shadow.camera.far = 10;
-dirLight.shadow.bias = -0.0001;
+function castShadow(light) {
+    light.castShadow = true;
+    light.shadow.camera.left = -1;
+    light.shadow.camera.right = 1;
+    light.shadow.camera.top = 1;
+    light.shadow.camera.bottom = -1;
+    light.shadow.mapSize.width = 2048; // 그림자 해상도
+    light.shadow.mapSize.height = 2048;
+    light.shadow.camera.near = 0.001;
+    light.shadow.camera.far = 10;
+    light.shadow.bias = -0.0001;
+}
+castShadow(dirLight);
 lightRig.add(dirLight);
+
+// 인게임 주광: 게임 장비 뷰어의 gsys_environment 덤프 값 (Hoian Viewer Resources/SPL3/fp_c5.bin)
+// row 5 = 색 × 세기 (6, 5.562, 4.494), row 23 = 빛이 진행하는 방향 (-0.709, -0.5, -0.497)
+const gameLight = new THREE.DirectionalLight(new THREE.Color(1, 0.927, 0.749), 6);
+gameLight.position.set(0.70941, 0.5, 0.49673);
+castShadow(gameLight);
+lightRig.add(gameLight);
+
+// 인게임 환경광: 게임 셰이더(decompile first.a.frag)처럼 확산은 SH × albedo, 반사는 거칠기로 고른 prefiltered 큐브 × EnvBRDF.
+// three.js 환경맵(PMREM)은 흐리는 방식과 확산 계산이 달라서 쓰지 않고, 머티리얼 셰이더에 직접 넣음
+// SH = 덤프 gsys_environment row 25-31 (게임이 읽는 packed 형태 그대로: 조도/π)
+// 큐브 = 덤프 cubemap.dds 0~11번을 한 장에 모은 atlas (tools/make_env_atlas.py). 블록 = [x, y, 면 크기], 면 6개가 가로로 놓임
+const ENV_ATLAS_BLOCKS = [[0, 0, 256], [0, 256, 64], ...Array.from({ length: 10 }, (_, i) => [384 + i % 6 * 192, 256 + Math.floor(i / 6) * 32, 32])];
+const gameEnv = {
+    s3EnvOn: { value: 0 },
+    s3EnvAtlas: { value: null },
+    s3EnvBlocks: { value: ENV_ATLAS_BLOCKS.map((b) => new THREE.Vector3(...b)) },
+    s3EnvRot: { value: new THREE.Matrix3() }, // 조명 방향 슬라이더
+    s3EnvBrdf: { value: null },
+    s3Sh: { value: [
+        [-0.046075, -0.27152, -0.0038073, 0.46444], [-0.043173, -0.24803, -0.003363, 0.43941], [-0.03598, -0.19789, -0.0027045, 0.39064],
+        [0.0025781, -3.0324e-05, -0.0046795, 0.00050236], [0.0026565, -0.0002019, -0.0046352, 0.0008451], [0.0027836, -0.00021951, -0.0040569, 0.00034307],
+        [0.0013908, 0.0012987, 0.00016375, 1],
+    ].map((r) => new THREE.Vector4(...r)) },
+};
+// 반사에 곱하는 EnvBRDF (F0 × A + B). 게임은 실행 중에 UE4 split-sum LUT를 만듦 (Hoian_Proc decompile):
+// GGX 중요도 샘플 1024개(Hammersley), k = r²/2, Fresnel exp2((−5.55473·VoH − 6.98316)·VoH). 같은 식으로 32×32를 만듦 (u = NoV, v = 거칠기)
+function makeEnvBrdfLut(size = 32, samples = 1024) {
+    const data = new Uint8Array(size * size * 2);
+    for (let j = 0; j < size; j++) {
+        const r = (j + 0.5) / size, a2 = r ** 4, k = r * r / 2;
+        for (let i = 0; i < size; i++) {
+            const NoV = (i + 0.5) / size, Vx = Math.sqrt(1 - NoV * NoV);
+            const gV = NoV / (NoV * (1 - k) + k);
+            let A = 0, B = 0;
+            for (let s = 0; s < samples; s++) {
+                let bits = s; // radical inverse
+                bits = ((bits << 16) | (bits >>> 16)) >>> 0;
+                bits = (((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >>> 1)) >>> 0;
+                bits = (((bits & 0x33333333) << 2) | ((bits & 0xCCCCCCCC) >>> 2)) >>> 0;
+                bits = (((bits & 0x0F0F0F0F) << 4) | ((bits & 0xF0F0F0F0) >>> 4)) >>> 0;
+                bits = (((bits & 0x00FF00FF) << 8) | ((bits & 0xFF00FF00) >>> 8)) >>> 0;
+                const phi = 2 * Math.PI * s / samples, y = bits / 4294967296;
+                const cosT = Math.sqrt((1 - y) / (1 + (a2 - 1) * y)), sinT = Math.sqrt(1 - cosT * cosT);
+                const Hx = sinT * Math.cos(phi), Hz = cosT;
+                const VoH = Vx * Hx + NoV * Hz, NoL = 2 * VoH * Hz - NoV;
+                if (NoL <= 0) continue;
+                const gVis = gV * (NoL / (NoL * (1 - k) + k)) * VoH / (Hz * NoV);
+                const Fc = 2 ** ((-5.55473 * VoH - 6.98316) * VoH);
+                A += (1 - Fc) * gVis;
+                B += Fc * gVis;
+            }
+            data[(j * size + i) * 2] = Math.round(A / samples * 255);
+            data[(j * size + i) * 2 + 1] = Math.round(B / samples * 255);
+        }
+    }
+    const texture = new THREE.DataTexture(data, size, size, THREE.RGFormat);
+    texture.magFilter = texture.minFilter = THREE.LinearFilter;
+    texture.needsUpdate = true;
+    return texture;
+}
+let gameEnvAtlas = null;
+function loadGameEnvAtlas() {
+    gameEnvAtlas ??= new THREE.TextureLoader().loadAsync('hdri/spl3_viewer_env.png').then((texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.flipY = false;
+        texture.generateMipmaps = false; // 밉을 만들면 옆 면이 섞임
+        texture.minFilter = THREE.LinearFilter;
+        gameEnv.s3EnvAtlas.value = texture;
+        gameEnv.s3EnvBrdf.value = makeEnvBrdfLut();
+    });
+    return gameEnvAtlas;
+}
+// 큐브 번호 = roundEven(5.5 − 5.5·cos(π·거칠기)) (first.a.frag:354). 면 방향은 D3D 큐브맵 규칙 (덤프 SH를 큐브 0번에서 다시 계산해서 확인)
+const GAME_ENV_GLSL = `uniform float s3EnvOn;
+uniform sampler2D s3EnvAtlas;
+uniform vec3 s3EnvBlocks[12];
+uniform mat3 s3EnvRot;
+uniform vec4 s3Sh[7];
+uniform sampler2D s3EnvBrdf;
+vec3 s3ShIrradiance(vec3 n) {
+    vec4 l = vec4(n, 1.0);
+    vec4 q = vec4(n.x * n.y, n.y * n.z, n.z * n.z, n.x * n.z);
+    return vec3(dot(s3Sh[0], l) + dot(s3Sh[3], q), dot(s3Sh[1], l) + dot(s3Sh[4], q), dot(s3Sh[2], l) + dot(s3Sh[5], q)) + s3Sh[6].xyz * (n.x * n.x - n.y * n.y);
+}
+vec3 s3EnvRadiance(vec3 d, float roughness) {
+    vec3 b = s3EnvBlocks[int(roundEven(5.5 - 5.5 * cos(PI * roughness)))];
+    vec3 a = abs(d);
+    float face;
+    vec2 uv;
+    if (a.x >= a.y && a.x >= a.z) { face = d.x > 0.0 ? 0.0 : 1.0; uv = vec2(-sign(d.x) * d.z, -d.y) / a.x; }
+    else if (a.y >= a.z) { face = d.y > 0.0 ? 2.0 : 3.0; uv = vec2(d.x, sign(d.y) * d.z) / a.y; }
+    else { face = d.z > 0.0 ? 4.0 : 5.0; uv = vec2(sign(d.z) * d.x, -d.y) / a.z; }
+    vec2 p = clamp((uv * 0.5 + 0.5) * b.z, 0.5, b.z - 0.5) + vec2(b.x + face * b.z, b.y);
+    return texture(s3EnvAtlas, p / vec2(textureSize(s3EnvAtlas, 0))).rgb * 1.05; // atlas는 1.05로 나눠 저장됨
+}
+`;
+function addGameEnv(shader) {
+    Object.assign(shader.uniforms, gameEnv);
+    shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>\n${GAME_ENV_GLSL}`)
+        // three.js의 radiance(→ DFG 근사)를 거치지 않고, 게임처럼 큐브 × (F0 × A + B)를 바로 더함. 거칠기 = max(맵, 1e-4) (fp_c1)
+        // SH 확산에는 (1 − F0)를 곱함 (first.a.frag:394 fma(albedo', −F0, albedo'))
+        .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+if (s3EnvOn > 0.5) {
+    float s3R = max(roughnessFactor, 1e-4);
+    vec2 s3Brdf = texture(s3EnvBrdf, vec2(saturate(dot(normal, geometryViewDir)), s3R)).rg;
+    vec3 s3Env = s3EnvRadiance(s3EnvRot * transformDirectionByInverseViewMatrix(reflect(-geometryViewDir, normal), viewMatrix), s3R);
+    reflectedLight.indirectSpecular += s3Env * (material.specularColorBlended * s3Brdf.x + s3Brdf.y);
+    reflectedLight.indirectDiffuse += s3ShIrradiance(s3EnvRot * transformDirectionByInverseViewMatrix(normal, viewMatrix)) * material.diffuseContribution * (1.0 - material.specularColorBlended);
+}`)
+        // 게임은 환경광(SH + 큐브)에 AO를 그대로 곱함. three.js는 환경맵이 있을 때만 반사에 AO를 (다른 식으로) 곱해서 여기서 곱함
+        .replace('#include <aomap_fragment>', '#include <aomap_fragment>\n#ifdef USE_AOMAP\nif (s3EnvOn > 0.5) reflectedLight.indirectSpecular *= ambientOcclusion;\n#endif');
+}
+// 인게임 tone mapping: 게임 HDR 합성 셰이더(Hoian_ProcHDRCompose decompile)의 곡선. T(v) = 1 − e^(−v)
+// 밝기 L = dot(x, (0.2989, 0.5866, 0.1144))로 색 비율을 지킨 x·T(L)/L에서 T(L)²만큼 채널별 T(x)로 넘어감. 출력은 pow(1/2.2)
+// 노출은 게임 값을 몰라서 1 (renderer.toneMappingExposure). bloom, 컬러 그레이딩, 비네트는 값이 미확인이라 안 넣음
+THREE.ShaderChunk.tonemapping_pars_fragment = THREE.ShaderChunk.tonemapping_pars_fragment.replace('vec3 CustomToneMapping( vec3 color ) { return color; }', `vec3 CustomToneMapping( vec3 color ) {
+    vec3 x = max(color * toneMappingExposure, 0.0);
+    float L = dot(x, vec3(0.2989, 0.5866, 0.1144));
+    float tL = 1.0 - exp(-L);
+    vec3 y = clamp(mix(x * (tL / max(L, 1e-8)), 1.0 - exp(-x), tL * tL), 0.0, 1.0);
+    // 뒤에서 three.js가 sRGB로 인코딩하므로 그만큼 되돌림 (sRGBTransferEOTF는 이 chunk보다 뒤에 선언돼서 직접 계산)
+    vec3 g = pow(y, vec3(1.0 / 2.2));
+    return mix(pow(g * 0.9478672986 + 0.0521327014, vec3(2.4)), g * 0.0773993808, vec3(lessThanEqual(g, vec3(0.04045))));
+}`);
 
 const dirLight2 = new THREE.DirectionalLight(0xffffff, 4);
 dirLight2.position.set(-1, 2, 1);
@@ -76,6 +205,7 @@ const planeMaterial = new THREE.MeshStandardMaterial({
     metalness: 0.1
 });
 
+planeMaterial.onBeforeCompile = addGameEnv;
 const floor = new THREE.Mesh(planeGeometry, planeMaterial);
 
 // 2. 바닥 눕히기 (기본은 서 있는 상태이므로 X축으로 -90도 회전)
@@ -98,6 +228,8 @@ const directLights = [hemiLight, dirLight, dirLight2, bottomLight, bottomLight2,
 const LIGHT_PRESETS = {
     default: { environment: pmremGenerator.fromScene(new THREE.Scene()).texture, directLights: true },
     studio: { environment: pmremGenerator.fromScene(new RoomEnvironment()).texture, directLights: false },
+    // 인게임 = 게임 장비 뷰어의 주광 + SH + 큐브 (위 gameLight, gameEnv) + 게임 tone mapping (CustomToneMapping)
+    game: { directLights: false, inGame: true },
     esplanade: { hdri: 'hdri/royal_esplanade_1k.hdr' },
     quarry: { hdri: 'hdri/quarry_01_1k.hdr' },
     sunset: { hdri: 'hdri/venice_sunset_1k.hdr' },
@@ -118,14 +250,17 @@ async function applyLightPreset(name) {
     const seq = ++presetSeq;
     const preset = LIGHT_PRESETS[name];
     const hdri = preset.hdri ? await loadHdri(preset.hdri) : null;
+    if (preset.inGame) await loadGameEnvAtlas();
     if (seq !== presetSeq) return; // 받는 동안 다른 프리셋이 선택됨
-    scene.environment = hdri ?? preset.environment;
+    scene.environment = hdri ?? preset.environment ?? null;
     scene.background = hdri ?? BACKGROUND_COLOR;
     scene.backgroundBlurriness = hdri ? HDRI_BLUR : 0;
     // HDRI는 1보다 밝은 값(해, 하늘)이 있어서 tone mapping으로 눌러야 자연스러움
-    renderer.toneMapping = hdri ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
+    renderer.toneMapping = hdri ? THREE.ACESFilmicToneMapping : preset.inGame ? THREE.CustomToneMapping : THREE.NoToneMapping;
     floor.visible = !hdri; // 회색 바닥은 HDRI 배경과 안 어울림
     for (const light of directLights) light.visible = !hdri && preset.directLights;
+    gameLight.visible = !!preset.inGame;
+    gameEnv.s3EnvOn.value = preset.inGame ? 1 : 0;
 }
 const lightSelect = document.getElementById('light-preset');
 lightSelect.addEventListener('change', () => applyLightPreset(lightSelect.value));
@@ -138,6 +273,7 @@ lightAngle.addEventListener('input', () => {
     lightRig.rotation.y = rad;
     scene.environmentRotation.y = rad;
     scene.backgroundRotation.y = rad;
+    gameEnv.s3EnvRot.value.setFromMatrix4(new THREE.Matrix4().makeRotationY(-rad));
 });
 
 
@@ -666,10 +802,10 @@ async function setupS3Material(material, parser) {
             ? `vec3 s3Emm = texture2D(emissiveMap, vEmissiveMapUv).rgb;\nvec3 s3Res = texture2D(resMap, vS3ResUv).rgb;\n`
                 + (normalize ? `totalEmissiveRadiance = s3Emm * (${calcExpr});` : `totalEmissiveRadiance *= (${calcExpr}) * ${emissionBase};`)
             : `#include <emissivemap_fragment>\ntotalEmissiveRadiance *= ${emissionBase};`;
-        // 밝기 가중치: R 0.298912는 decompile 상수, G·B와 0 나눗셈 방지 값은 상수 버퍼(fp_c1)라 값을 모름. 같은 계열 가중치(0.586611, 0.114478)로 추측
+        // 밝기 가중치 (0.298912, 0.586611, 0.114478)와 0 나눗셈 방지 1e-8: 블래스터 쇼트 프로그램의 상수 버퍼(fp_c1)에서 확인
         // three.js는 emission_intensity를 emissive 색에 곱해서 넘김. 이 머티리얼은 기준 색이 잉크 색이라 emissive 색이 흰색 → emissive.r이 intensity
         const normalizeCode = normalize ? 'float s3I = emissive.r;\nfloat s3K = clamp(length(s3Emm), 0.0, 1.0);\n'
-            + 'vec3 s3N = outgoingLight * (1.0 + s3K * (s3I / max(dot(outgoingLight, vec3(0.298912, 0.586611, 0.114478)), 1e-4) - 1.0));\n'
+            + 'vec3 s3N = outgoingLight * (1.0 + s3K * (s3I / max(dot(outgoingLight, vec3(0.298912, 0.586611, 0.114478)), 1e-8) - 1.0));\n'
             + 'outgoingLight = s3I > 1.0 ? s3N : mix(outgoingLight, s3N, s3I);\n' : '';
         shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nuniform sampler2D resMap;\nuniform float inkPaint;\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.fragmentShader
             .replace('#include <map_fragment>',
@@ -677,6 +813,7 @@ async function setupS3Material(material, parser) {
             .replace('#include <emissivemap_fragment>', emissive)
             .replace('#include <opaque_fragment>', `${normalizeCode}#include <opaque_fragment>`)
             .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>\n${f0 ? `material.specularColorBlended = ${f0};` : ''}`);
+        addGameEnv(shader);
     };
     material.needsUpdate = true;
 }
@@ -836,6 +973,7 @@ function loadModel(fileName) {
                     newMat.userData.teamColor = { value: teamColor };
 
                     newMat.onBeforeCompile = (shader) => {
+                        addGameEnv(shader);
                         shader.uniforms.tclMap = newMat.userData.tclMap;
                         shader.uniforms.trmMap = newMat.userData.trmMap;
                         shader.uniforms.opaMap = newMat.userData.opaMap;
