@@ -1214,6 +1214,7 @@ const weaponData = [
                 {name: '스플랫 슈터', file: 'NormalT'},
                 {name: '스플랫 슈터 컬래버', file: 'NormalT_Cstm01'},
                 {name: '글램 스플랫 슈터', file: 'NormalT_Cstm02'},
+                {name: 'PET 슈터 레플리카', file: 'Normal_SprlA'},
                 {name: '옥타 슈터 레플리카', file: 'RvSdodr'},
                 {name: '오더 슈터 레플리카', file: 'NormalSdodr'},
                 {name: '스페이스 슈터', file: 'QuickLong'},
