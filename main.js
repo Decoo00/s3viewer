@@ -129,6 +129,8 @@ function loadGameEnvAtlas() {
 }
 // 큐브 번호 = roundEven(5.5 − 5.5·cos(π·거칠기)) (first.a.frag:354). 면 방향은 D3D 큐브맵 규칙 (덤프 SH를 큐브 0번에서 다시 계산해서 확인)
 const GAME_ENV_GLSL = `uniform float s3EnvOn;
+vec3 s3AmbNormal; // SH 확산을 읽는 법선 (transfilm은 정점 법선 쪽으로 섞음). 머티리얼이 안 정하면 normal
+bool s3AmbNormalSet = false;
 uniform sampler2D s3EnvAtlas;
 uniform vec3 s3EnvBlocks[12];
 uniform mat3 s3EnvRot;
@@ -163,7 +165,7 @@ if (s3EnvOn > 0.5) {
     vec2 s3Brdf = texture(s3EnvBrdf, vec2(saturate(dot(normal, geometryViewDir)), s3R)).rg;
     vec3 s3Env = s3EnvRadiance(s3EnvRot * transformDirectionByInverseViewMatrix(reflect(-geometryViewDir, normal), viewMatrix), s3R);
     reflectedLight.indirectSpecular += s3Env * (material.specularColorBlended * s3Brdf.x + s3Brdf.y);
-    reflectedLight.indirectDiffuse += s3ShIrradiance(s3EnvRot * transformDirectionByInverseViewMatrix(normal, viewMatrix)) * material.diffuseContribution * (1.0 - material.specularColorBlended);
+    reflectedLight.indirectDiffuse += s3ShIrradiance(s3EnvRot * transformDirectionByInverseViewMatrix(s3AmbNormalSet ? s3AmbNormal : normal, viewMatrix)) * material.diffuseContribution * (1.0 - material.specularColorBlended);
 }`)
         // 게임은 환경광(SH + 큐브)에 AO를 그대로 곱함. three.js는 환경맵이 있을 때만 반사에 AO를 (다른 식으로) 곱해서 여기서 곱함
         .replace('#include <aomap_fragment>', '#include <aomap_fragment>\n#ifdef USE_AOMAP\nif (s3EnvOn > 0.5) reflectedLight.indirectSpecular *= ambientOcclusion;\n#endif');
@@ -745,6 +747,10 @@ async function setupS3Material(material, parser) {
         material.emissive.fromArray(emissionType === '1' || emissionType === '2' ? [1, 1, 1] : params.emission_color);
         material.emissiveIntensity = params.emission_intensity;
     }
+    // 조명 없는 머티리얼 (decompile: 래피드 블래스터 엘리트 M_Ray, program 12569): 색 = albedo_color × (1 + emission 맵 × intensity), 알베도 텍스처 없음
+    // build_glb가 이 조합(enable_shading False, 알베도 텍스처 없음, emission_color_type 1)에만 albedo_color를 넣음
+    const unlit = params?.albedo_color !== undefined;
+    if (unlit) material.color.fromArray(params.albedo_color);
     // calc_color0: replace_color 2면 emission 맵 값 자리에 피연산자 A, B, C를 조합한 값을 씀
     // decompile 확인: 소이 튜버 M_Body (계산 5, A 3, B 9, C 50) = Emm × 잉크 색 + Resource0, 스퀵 클린 M_Bottle (계산 2, A 3, B 10) = Emm × Resource1
     //   블래스터 쇼트 M_Body (계산 1, A 50, B 3) = 잉크 색 × Emm + 잉크 색
@@ -785,7 +791,64 @@ async function setupS3Material(material, parser) {
     // three.js에서 실제 F0로 쓰이는 값은 specularColorBlended (specularColor를 metalness로 섞은 값)
     const f0 = options.enable_manual_fresnel === 'True'
         ? `vec3(${params.manual_fresnel_color.map((c) => (c * params.manual_fresnel).toFixed(4)).join(', ')})` : null;
-    material.customProgramCacheKey = () => [tcl, paint, emissionBase, f0, calcExpr, resMap && resUv, normalize].join('|'); // 기본 키(onBeforeCompile 소스)는 머티리얼마다 같아서 셰이더가 섞일 수 있음
+    // transfilm / edge light / transmission (decompile: 스퍼터리 OWL M_Twins_Short_Cstm02, 프라임 슈터 계열 M_Body)
+    // - transfilm: film = sat(NoV^film_transmission_power × film_transmission_rate × Fxm). 확산색 = mix(albedo × (1 − metal), 막 색, film),
+    //   SH를 읽는 법선 = mix(normal, 정점 법선, film). 정면일수록 막 색이 보임 (스퍼터리 OWL의 갈색)
+    //   막 색 = under_film_color × (under_film_multicolor 0: 1, 1: albedo (머뉴버 롱 M_Body), 2: 잉크 색 (머뉴버 NormalT M_Bottle)). 3, 20, 30, 40은 미확인이라 transfilm을 안 함
+    // - edge light: 확산색 += SH(−V) × edge_light_color × (1 − NoV)^edge_light_power × edge_light_intens × Fxm. 게임 SH가 있는 인게임 프리셋에서만
+    // - transmission (enable_edge_transmission일 때): 직접광의 확산·반사 × (1 − t), t = transmission_rate × (1 − film).
+    //   대신 t × 투과색 × 빛 세기 × (1 − NoV × sat(−NoL))^edge_transmission_power × ((s − 1)² × (sat(V·빛 진행 방향)^(1/s) − 0.2) + 0.2)를 더함 (s = scattering_rate)
+    //   투과색 = Trm 맵 × transmission_color_backlight × (transmission_multi_color 1: 잉크 섞은 albedo, 2: 잉크 색). 0, 20, 30, 40은 미확인이라 안 함
+    //   게임은 빛 색 대신 세기(gsys_environment row 5.w)만 곱함 → 빛 색의 최댓값으로 씀. 그림자는 게임과 달리 three.js 그림자가 그대로 곱해짐
+    const S3_FIXED = (v) => Number(v).toFixed(5);
+    const S3_VEC3 = (v) => `vec3(${v.map(S3_FIXED).join(', ')})`;
+    const underFilm = params?.under_film_color && { '0': '', '1': ' * s3AlbedoInk', '2': ' * teamColor' }[options.under_film_multicolor ?? '0'];
+    const film = options.enable_transfilm === 'True' && params?.film_transmission_rate !== undefined && underFilm !== undefined;
+    const edgeLight = options.enable_edge_light === 'True' && params?.edge_light_intens !== undefined;
+    const transColor = { '1': 's3AlbedoInk', '2': 'teamColor' }[options.transmission_multi_color];
+    const trmMap = options.enable_taransmission === 'True' && options.enable_edge_transmission === 'True' && options.enable_transmission_map === 'True'
+        && transColor && params?.transmission_rate !== undefined ? await load('_t0') : null;
+    if (trmMap) trmMap.colorSpace = THREE.SRGBColorSpace; // 게임 텍스처 포맷이 BC1 SRGB
+    // transmission_mask: t에 곱하는 마스크 (decompile: 이 옵션만 다른 프로그램 쌍 비교). 0: _re0, 1: _re1, 2: _fm0, 3(기본): 없음, 4: _re2 (r 채널, UV0)
+    const transMaskKey = { '0': '_re0', '1': '_re1', '2': '_fm0', '4': '_re2' }[options.transmission_mask ?? '3'];
+    const transMask = trmMap && transMaskKey ? await load(transMaskKey) : null; // 마스크 텍스처가 없으면 게임이 무엇을 읽는지 몰라서 투과를 끔 (t = 0)
+    material.userData.transMaskMap = { value: transMask };
+    const fmMap = (film || edgeLight || f0) && options.enable_sfxmask === 'True' ? await load('_fm0') : null;
+    material.userData.trmMap = { value: trmMap };
+    material.userData.fmMap = { value: fmMap };
+    const fm = fmMap ? 'texture2D(fmMap, vS3Uv).r' : '1.0';
+    // manual fresnel 마스크: enable_sfxmask면 F0 = mix(일반 F0(metalness로 0.04와 albedo를 섞은 값), manual F0, Fxm), 아니면 전체가 manual F0
+    // (decompile: 이 옵션만 다른 프로그램 1905 ↔ 2003 비교. 소방 FF M_Body는 노란 고리 부분만 금색 반사)
+    const f0Code = !f0 ? '' : options.enable_sfxmask === 'True'
+        ? (fmMap ? `material.specularColorBlended = mix(material.specularColorBlended, ${f0}, ${fm});` : '') // Fxm 맵이 없으면 무엇을 읽는지 몰라서 manual fresnel을 안 씀
+        : `material.specularColorBlended = ${f0};`;
+    const filmCode = !film && !edgeLight ? '' : `float s3NoV = dot(normal, normalize(vViewPosition));
+float s3Fm = ${fm};
+${film ? `float s3Film = saturate(pow(saturate(max(s3NoV, 1e-3)), ${S3_FIXED(params.film_transmission_power)}) * ${S3_FIXED(params.film_transmission_rate)} * s3Fm);
+material.diffuseContribution = mix(material.diffuseContribution, ${S3_VEC3(params.under_film_color)}${underFilm}, s3Film);
+s3AmbNormal = mix(normal, nonPerturbedNormal, s3Film);
+s3AmbNormalSet = true;` : 'float s3Film = 0.0;'}
+${edgeLight ? `if (s3EnvOn > 0.5) material.diffuseContribution += max(s3ShIrradiance(s3EnvRot * transformDirectionByInverseViewMatrix(-normalize(vViewPosition), viewMatrix)), 0.0)
+    * ${S3_VEC3(params.edge_light_color)} * pow(saturate(1.0 - s3NoV), ${S3_FIXED(params.edge_light_power)}) * ${S3_FIXED(params.edge_light_intens)} * s3Fm;` : ''}
+`;
+    const transCode = !trmMap ? '' : `s3TransRate = ${S3_FIXED(params.transmission_rate)}${transMask ? ' * texture2D(transMaskMap, vS3Uv).r' : transMaskKey ? ' * 0.0' : ''} * (1.0 - ${film ? 's3Film' : '0.0'});
+s3TransColor = texture2D(trmMap, vS3Uv).rgb * ${S3_VEC3(params.transmission_color_backlight)} * ${transColor};
+`;
+    const transGlsl = !trmMap ? '' : `float s3TransRate = 0.0;
+vec3 s3TransColor = vec3(0.0);
+void s3Direct(const in IncidentLight directLight, const in vec3 geometryPosition, const in vec3 geometryNormal, const in vec3 geometryViewDir, const in vec3 geometryClearcoatNormal, const in PhysicalMaterial material, inout ReflectedLight reflectedLight) {
+    ReflectedLight s3L = ReflectedLight(vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
+    RE_Direct_Physical(directLight, geometryPosition, geometryNormal, geometryViewDir, geometryClearcoatNormal, material, s3L);
+    reflectedLight.directDiffuse += s3L.directDiffuse * (1.0 - s3TransRate);
+    reflectedLight.directSpecular += s3L.directSpecular * (1.0 - s3TransRate);
+    float s = ${S3_FIXED(params.scattering_rate)};
+    float s1 = (s - 1.0) * (s - 1.0);
+    float edge = pow(saturate(1.0 - dot(geometryNormal, geometryViewDir) * saturate(-dot(geometryNormal, directLight.direction))), ${S3_FIXED(params.edge_transmission_power)});
+    float scatter = s1 * pow(saturate(max(dot(geometryViewDir, -directLight.direction), 1e-3)), 1.0 / s) - 0.2 * s1 + 0.2;
+    reflectedLight.directDiffuse += s3TransColor * max(max(directLight.color.r, directLight.color.g), directLight.color.b) * edge * scatter * s3TransRate;
+}
+`;
+    material.customProgramCacheKey = () => [tcl, paint, emissionBase, f0, calcExpr, resMap && resUv, normalize, unlit, f0Code, filmCode, transCode, transGlsl].join('|'); // 기본 키(onBeforeCompile 소스)는 머티리얼마다 같아서 셰이더가 섞일 수 있음
     material.onBeforeCompile = (shader) => {
         shader.uniforms.teamColor = { value: teamColor };
         shader.uniforms.tclMap = material.userData.tclMap;
@@ -794,6 +857,9 @@ async function setupS3Material(material, parser) {
         shader.uniforms.s3UvOffset = material.userData.uvOffset;
         shader.uniforms.resMap = material.userData.resMap;
         shader.uniforms.s3ResUvOffset = material.userData.resUvOffset;
+        shader.uniforms.trmMap = material.userData.trmMap;
+        shader.uniforms.fmMap = material.userData.fmMap;
+        shader.uniforms.transMaskMap = material.userData.transMaskMap;
         // uv1은 three.js가 두 번째 UV를 쓰는 맵이 있을 때만 선언함
         shader.vertexShader = '#ifndef USE_UV1\nattribute vec2 uv1;\n#endif\nuniform vec2 s3UvOffset;\nuniform vec2 s3ResUvOffset;\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.vertexShader.replace(
             '#include <uv_vertex>', `#include <uv_vertex>\nvS3Uv = uv + s3UvOffset;\nvS3ResUv = ${resMap ? resUv : 'uv'} + s3ResUvOffset;`);
@@ -807,12 +873,14 @@ async function setupS3Material(material, parser) {
         const normalizeCode = normalize ? 'float s3I = emissive.r;\nfloat s3K = clamp(length(s3Emm), 0.0, 1.0);\n'
             + 'vec3 s3N = outgoingLight * (1.0 + s3K * (s3I / max(dot(outgoingLight, vec3(0.298912, 0.586611, 0.114478)), 1e-8) - 1.0));\n'
             + 'outgoingLight = s3I > 1.0 ? s3N : mix(outgoingLight, s3N, s3I);\n' : '';
-        shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nuniform sampler2D resMap;\nuniform float inkPaint;\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.fragmentShader
+        shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nuniform sampler2D resMap;\nuniform sampler2D trmMap;\nuniform sampler2D fmMap;\nuniform sampler2D transMaskMap;\nuniform float inkPaint;\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.fragmentShader
             .replace('#include <map_fragment>',
-                `#include <map_fragment>\nvec3 s3Albedo = diffuseColor.rgb;\ndiffuseColor.rgb = mix(diffuseColor.rgb, teamColor, max(${tcl}, ${paint}));`)
+                `#include <map_fragment>\nvec3 s3Albedo = diffuseColor.rgb;\ndiffuseColor.rgb = mix(diffuseColor.rgb, teamColor, max(${tcl}, ${paint}));\nvec3 s3AlbedoInk = diffuseColor.rgb;`)
+            .replace('#include <lights_physical_pars_fragment>', `#include <lights_physical_pars_fragment>\n${transGlsl}`)
+            .replace('#include <lights_fragment_begin>', trmMap ? THREE.ShaderChunk.lights_fragment_begin.replaceAll('RE_Direct( directLight,', 's3Direct( directLight,') : '#include <lights_fragment_begin>')
             .replace('#include <emissivemap_fragment>', emissive)
-            .replace('#include <opaque_fragment>', `${normalizeCode}#include <opaque_fragment>`)
-            .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>\n${f0 ? `material.specularColorBlended = ${f0};` : ''}`);
+            .replace('#include <opaque_fragment>', `${unlit ? 'outgoingLight = diffuseColor.rgb + totalEmissiveRadiance;\n' : ''}${normalizeCode}#include <opaque_fragment>`)
+            .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>\n${f0Code}\n${filmCode}${transCode}`);
         addGameEnv(shader);
     };
     material.needsUpdate = true;

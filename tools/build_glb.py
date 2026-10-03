@@ -14,6 +14,7 @@ usage: python build_glb.py <Model 폴더> <출력 폴더> [파일 패턴, 기본
 """
 import fnmatch, json, math, os, re, struct, subprocess, sys, tempfile
 import zstandard
+import add_s3_params  # 같은 폴더
 
 BFRASS = os.environ.get('BFRASS', 'bfrass')
 FSKA_DUMP = os.environ.get('FSKA_DUMP', os.path.join(os.path.dirname(__file__), 'fska_dump', 'out', 'fska_dump.dll'))
@@ -450,9 +451,18 @@ def build_file(bfres, out_dir, work, taken):
             if opts.get('enable_emission') == 'True':
                 used['emission_intensity'] = params['emission_intensity'][0]
                 used['emission_color'] = params['emission_color'][:3]
+                # 조명 없음 + 알베도 텍스처 없음 + 기준 색 알베도: 색 = albedo_color × (1 + emission 맵 × intensity)
+                # (decompile: 래피드 블래스터 엘리트 M_Ray, program 12569). 확인한 조합만
+                if opts.get('enable_shading') == 'False' and opts.get('enable_albedo_tex') == 'False' and opts.get('emission_color_type') == '1':
+                    used['albedo_color'] = params['albedo_color'][:3]
             if opts.get('enable_manual_fresnel') == 'True':
                 used['manual_fresnel'] = params['manual_fresnel'][0]
                 used['manual_fresnel_color'] = params['manual_fresnel_color'][:3]
+            # transfilm / edge light / transmission (add_s3_params.py와 같은 키)
+            for opt, keys in add_s3_params.PARAMS.items():
+                if opts.get(opt) == 'True':
+                    for k in keys:
+                        used[k] = params[k][0] if len(params[k]) == 1 else params[k][:3]
             if used:
                 s3['params'] = used
             if param_anims := material_param_animations(anims, name, names):
