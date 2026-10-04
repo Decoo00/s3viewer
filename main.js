@@ -2128,7 +2128,7 @@ const weaponData = [
             {name: 'Mr. 베어표 블래스터', file: 'Coop'},
         ]
      },
-    { id: 'Maneuver', name: '머뉴버', img: 'wpntypes/IconTypeWpn_02.png',
+    { id: 'Maneuver', name: '머뉴버', img: 'wpntypes/IconTypeWpn_02.png',   // 머누버 아닌가요? 응 아니야
         items: [
             {name: '스플랫 머뉴버', file: 'NormalT'},
             {name: '스플랫 머뉴버 컬래버', file: 'NormalT_Cstm01'},
@@ -2299,7 +2299,7 @@ weaponData.forEach(cat => {
     
     btn.onclick = () => {
         for (const other of categoryBar.children) other.classList.toggle('active', other === btn);
-        console.log(`${cat.name} 카테고리 선택됨`);
+        // console.log(`${cat.name} 카테고리 선택됨`);
         
         listTitle.textContent = cat.name;
         modelList.innerHTML = '';
