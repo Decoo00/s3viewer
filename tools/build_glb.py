@@ -4,6 +4,8 @@
 - bfres 하나에 모델이 여러 개면(예: 우산+케이스, 듀얼 좌우) 모델마다 glb를 따로 만든다.
 - 머티리얼마다 셰이더 샘플러(_a0, _n0, _su0 …) → 텍스처 매핑과 셰이더 옵션을 material.extras.s3에 넣는다.
   불투명이 아니면 render state(블렌딩, 깊이 쓰기, alpha test)도, 뷰어가 쓰는 파라미터(opacity, emission, manual fresnel)는 params에 넣는다.
+- 게임 render info와 샘플러 설정을 glTF 표준 필드로 옮긴다: 양면(doubleSided), 텍스처 wrap/filter(samplers).
+- 1채널 텍스처(R=G=B=A인 PNG)는 회색 PNG로 다시 쓴다 (무손실, 용량만 줄어듦). 정점 컬러는 넣지 않는다 (무기 셰이더가 안 읽음).
 - 무기군별 기본 방향 보정(ROTATE_Y)을 루트 노드 회전으로 넣는다.
 - 기본 무기 bfres의 스켈레탈 애니메이션 중 ANIMATIONS(롤러 접기/펴기 등)를 glTF 애니메이션으로 넣는다 (tools/fska_dump 필요).
 - 붙은 본이 invisible인 셰이프는 node.extras.s3.hidden = true로 표시한다 (게임에서 기본으로 숨겨진 부품).
@@ -12,16 +14,17 @@
 usage: python build_glb.py <Model 폴더> <출력 폴더> [파일 패턴, 기본 Wmn_*.bfres.zs]
 환경 변수 BFRASS로 bfrass 실행 파일 경로를 지정할 수 있다 (기본: PATH의 bfrass).
 """
-import fnmatch, json, math, os, re, struct, subprocess, sys, tempfile
+import fnmatch, json, math, os, re, struct, subprocess, sys, tempfile, zlib
 import zstandard
 import add_s3_params  # 같은 폴더
 
 BFRASS = os.environ.get('BFRASS', 'bfrass')
 FSKA_DUMP = os.environ.get('FSKA_DUMP', os.path.join(os.path.dirname(__file__), 'fska_dump', 'out', 'fska_dump.dll'))
 DEFAULT = '<Default Value>'
-RENDER_KEYS = {'gsys_render_state_mode', 'gsys_render_state_blend_mode', 'gsys_depth_test_write', 'gsys_alpha_test_enable', 'gsys_alpha_test_value'}
+RENDER_KEYS = {'gsys_render_state_mode', 'gsys_render_state_blend_mode', 'gsys_depth_test_write', 'gsys_alpha_test_enable', 'gsys_alpha_test_value',
+               'gsys_render_state_display_face', 'gsys_dynamic_depth_shadow_only'}
 # 무기군별 기본 방향 보정: 수직축(Y) 회전 각도(도). 뷰어 기본 카메라에서 정면이 보이도록 루트 노드에 회전만 넣는다 (정점은 그대로)
-ROTATE_Y = {'Wmn_Roller_': 90}
+ROTATE_Y = {'Wmn_Roller_': 90, 'Wmn_Stringer_': 180}
 # glb에 넣을 애니메이션 (롤러 접기/펴기, 쿠마 롤러 엔진, 소방 FF 사격 모드 전환 등). 컬래버 파일은 애니메이션이 없어서 기본 무기 것을 쓴다 (본 구성이 같음)
 # 셰이더 파라미터 애니메이션은 이 이름들 + 이름이 '_auto'로 끝나는 것(게임이 자동 재생, 예: 히어로 슈터 발광)
 ANIMATIONS = ('Open', 'Close', 'Open_Loop', 'Shot_Long_St', 'Shot_Short_St')
@@ -31,11 +34,35 @@ ANIMATIONS = ('Open', 'Close', 'Open_Loop', 'Shot_Long_St', 'Shot_Short_St')
 #       R-PEN 'Shot'(Bullet 본 반동)·'Bullet'(Bullet01~05 보임/숨김)
 # 블래스터: 'Shot'(본 반동, 라이트·쇼트는 M_Body 발광도), 프리시전 'JumpShot'.
 #         쇼트의 'Wait'·'Wmn_Blaster_Short'(반복)은 넣지 않음: 본 커브가 없고, 발광을 바꾸는 M_Glass는 emission이 꺼져 있고 M_GlassInv는 모델에 없음
+# 붓: 빈센트 'TransformToAttack'/'TransformToWait'(Head 본을 대기 자세 ↔ 공격 자세로), 'Attack'(공격 자세에서 시작하고 끝나는 흔들림).
+#     빈센트 'Wait'은 본 커브가 없어서 넣지 않음
+# 슬로셔: 베어표 'Wmn_Slosher_Coop'(M_Body 발광 + tex_mtx1, 게임 액터 AS의 'Swing'이 가리킴). 익스플로셔 발광은 '_auto'로 들어감
+# 셸터: 'Fly'(사출한 우산막이 날아가는 동안 반복. 파라·캠핑·도돌이·오더에만 있음, 스파이 가젯·베어표에는 없음)
+# 스트링거: 'Default'(대기), 'Charge'(세로 차지), 'ChargeWidth'(가로 차지), 'Shoot'(발사). 본 + M_Body·M_String 발광 + M_String tex_mtx0.
+#          베어표는 M_Receiver 발광 'Charge_Light'(반복)·'Shoot_Light'도. 게임 AS(WeaponStringer.root.asb)에 이 이름들과 변수 ChargeRate·TiltDeg가 있음
+# 와이퍼: 'Charge'(반복)·'Shot'(사무·베어표: Wave 본 + StampA/B 보임/숨김 + M_Stamp tex_mtx0, 베어표는 M_Coil 발광도. 드라이브: Body·Blade 본),
+#         드라이브 'Wmn_Saber_Light_Charge'(M_Body_Tube 발광 + tex_mtx1, 100프레임에 걸쳐 차오르고 유지),
+#         덴탈 'Charge_SberHeavy00_St'(차지 시작)·'Charge_SberHeavy00'(반복)·'ChargeAttack_SberHeavy00'(차지 공격, 10~66프레임 Case 숨김).
+#         덴탈 'Step_SberHeavy00'은 사용자가 요청한 기본/차지/공격에 없어서 넣지 않음. 덴탈 'Shot'은 본 커브가 없고 M_Stamp도 없음
 ANIMATIONS_BY_PREFIX = {'Wmn_Spinner_': ('Deform', 'DeformEmm', 'Shot'),
                         'Wmn_Charger_': ('Wmn_Charger_Keeper_Charge', 'Wmn_Charger_Quick_Charge', 'Shot', 'Bullet'),
-                        'Wmn_Blaster_': ('Shot', 'JumpShot')}
+                        'Wmn_Blaster_': ('Shot', 'JumpShot'),
+                        'Wmn_Brush_': ('TransformToAttack', 'TransformToWait', 'Attack'),
+                        'Wmn_Slosher_': ('Wmn_Slosher_Coop',),
+                        'Wmn_Shelter_': ('Fly',),
+                        'Wmn_Stringer_': ('Default', 'Charge', 'ChargeWidth', 'Shoot', 'Charge_Light', 'Shoot_Light'),
+                        'Wmn_Saber_': ('Charge', 'Shot', 'Wmn_Saber_Light_Charge', 'Charge_SberHeavy00_St', 'Charge_SberHeavy00', 'ChargeAttack_SberHeavy00')}
+# 커브가 없어도 기준값이 바인드 자세와 다른 본을 넣는 무기군 (게임은 커브가 없는 본에도 애니메이션 기준값을 씀.
+# 예: 플루이드 V·LACT-450의 Charge는 커브 없이 Piston·ReelT·ReelU 기준값만 다름). 다른 무기군은 다시 변환하면 결과가 바뀔 수 있어서 확인한 무기군만
+STATIC_BONE_PREFIXES = ('Wmn_Stringer_',)
+# 정적 tex_mtx0·1(SRT)을 material.extras.s3.tex_srt에 넣는 무기군. 뷰어는 tex_srt가 있으면 게임 식(g3d Maya)으로 UV를 바꿈
+# (예: 와이퍼 M_Stamp는 세로 4배라 이걸 안 하면 stamp에 2cl 칠 영역이 안 걸림). 이동 애니메이션의 X 부호도 게임 식을 따르게 되므로 확인한 무기군만
+TEX_SRT_PREFIXES = ('Wmn_Saber_',)
+# 본 flags의 Segment Scale Compensate 비트 (무기 스켈레톤은 스케일 모드 Maya)
+SSC_FLAG = 1 << 23
 ANIM_SAMPLES_PER_FRAME = 2  # 게임 커브(cubic)를 이 간격으로 샘플링해서 glTF linear 키로 넣음 (게임 60fps 기준 프레임)
-PARAM_KEYS = {'opacity', 'emission_intensity', 'emission_color', 'manual_fresnel', 'manual_fresnel_color'}
+# nn::gfx 샘플러 wrap → glTF (BfresLibrary SamplerSwitch.TexClamp: Repeat, Mirror, Clamp(to edge). 무기에는 이 셋만 있음)
+GL_WRAP = {0: 10497, 1: 33648, 2: 33071}
 # 왼손 모델(<모델>_L)이 bfres에 없으면 오른손 모델을 X축(좌우)으로 대칭시켜 만든다. 머뉴버는 양손에 하나씩 드는데 듀얼 스위퍼만 _L이 따로 있음
 MIRROR_L = ('Wmn_Maneuver_',)
 
@@ -70,15 +97,19 @@ def parse_mat_info(text):
     mats, cur = {}, None
     for line in text.splitlines():
         if m := re.match(r'^Texture properties for (\S+):', line):
-            cur = mats.setdefault(m.group(1), {'shader': None, 'render': {}, 'params': {}, 'samplers': {}, 'attributes': {}, 'options': {}})
+            cur = mats.setdefault(m.group(1), {'shader': None, 'render': {}, 'params': {}, 'samplers': {}, 'attributes': {}, 'options': {}, 'tex_srt': {}})
         elif cur is None:
             continue
         elif (m := re.match(r'^  (gsys_\w+): (.+)', line)) and m.group(1) in RENDER_KEYS:
             cur['render'][m.group(1)] = m.group(2)
         elif m := re.match(r'^Shader: (.+)', line):
             cur['shader'] = m.group(1)
-        elif (m := re.match(r'^(\w+): (.+)', line)) and m.group(1) in PARAM_KEYS:
+        # 숫자 파라미터는 전부 (tex_mtx 같은 SRT 값은 제외). 일부만 저장했더니 transmission 키를 읽을 때 KeyError가 났음
+        elif m := re.match(r'^(\w+): (-?[\d.]+(?:e[-+]?\d+)?(?:, -?[\d.]+(?:e[-+]?\d+)?)*)$', line):
             cur['params'][m.group(1)] = [float(x) for x in m.group(2).split(', ')]
+        elif m := re.match(r'^(tex_mtx[0-2]): Scale X = (\S+), Y = (\S+) \| Rotate = (\S+) \| Translation X = (\S+), Y = (\S+) \| Axis: (.+)$', line):
+            sx, sy, rot, tx, ty = map(float, m.group(2, 3, 4, 5, 6))
+            cur['tex_srt'][m.group(1)] = {'mode': m.group(7), 'scale': [sx, sy], 'rotate': rot, 'translate': [tx, ty]}
         elif (m := re.match(r'^  sampler (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
             cur['samplers'][m.group(1)] = m.group(2)
         elif (m := re.match(r'^  attribute (\S+) = (.+)', line)) and m.group(2) != DEFAULT:
@@ -141,19 +172,168 @@ def add_image(gltf, binary, name, png):
     return len(gltf['images']) - 1
 
 
-def texture_for(gltf, binary, name, tex_dirs):
-    """이름으로 텍스처 인덱스를 찾고, 없으면 PNG를 넣어서 만든다."""
+def texture_for(gltf, binary, name, tex_dirs, sampler):
+    """이름과 glTF 샘플러로 텍스처 인덱스를 찾고, 없으면 만든다 (이미지가 없으면 PNG를 넣음).
+    glTF 텍스처는 (이미지, 샘플러) 쌍이라, 같은 이미지라도 샘플러가 다르면 따로 만든다."""
     images = gltf.setdefault('images', [])
     img = next((i for i, im in enumerate(images) if im.get('name') in (name, name + '.png')), None)
     if img is None:
         src = next(p for d in tex_dirs if os.path.exists(p := os.path.join(d, name + '.png')))
         img = add_image(gltf, binary, name, open(src, 'rb').read())
+    samplers = gltf.setdefault('samplers', [])
+    if sampler not in samplers:
+        samplers.append(sampler)
     textures = gltf.setdefault('textures', [])
-    tex = next((i for i, t in enumerate(textures) if t.get('source') == img), None)
-    if tex is None:
-        textures.append({'source': img})
-        tex = len(textures) - 1
-    return tex
+    key = {'source': img, 'sampler': samplers.index(sampler)}
+    if key not in textures:
+        textures.append(key)
+    return textures.index(key)
+
+
+def material_samplers(bfres, debug_text, model):
+    """bfres v10 FMAT의 샘플러 설정(nn::gfx SamplerInfo) → {머티리얼: {머티리얼 샘플러 이름: glTF sampler}}.
+    BfrAss는 이 값을 읽기만 하고 출력하지 않아서 직접 읽는다 (배치는 BfrAss SwitchLoader::loadMaterialV10·loadSamplers와 같음).
+    FMAT 위치는 --debug의 FMDL 줄(fmatArray, fmatCount)에서, FMAT 하나는 0xB0바이트"""
+    b = open(bfres, 'rb').read()
+    u16 = lambda o: struct.unpack_from('<H', b, o)[0]
+    u64 = lambda o: struct.unpack_from('<Q', b, o)[0]
+    string = lambda o: b[o + 2:o + 2 + u16(o)].decode()
+    m = re.search(rf'^FMDL: name={re.escape(model)} .*fmatArray=0x([0-9A-F]+) .*fmatCount=(\d+)', debug_text, re.M)
+    result = {}
+    for i in range(int(m.group(2))):
+        o = int(m.group(1), 16) + 0xB0 * i
+        assert b[o:o + 4] == b'FMAT', hex(o)
+        array, dic, count = u64(o + 0x30), u64(o + 0x38), b[o + 0xA2]
+        names = [string(u64(dic + 8 + 16 * (k + 1) + 8)) for k in range(count)]  # ResDic 노드 16바이트, 0번은 루트
+        result[string(u64(o + 8))] = {names[k]: gltf_sampler(b[array + 32 * k: array + 32 * k + 32]) for k in range(count)}
+    return result
+
+
+def gltf_sampler(info):
+    """SamplerInfo 32바이트 → glTF sampler. filter 비트: 밉 0-1, 확대 2-3, 축소 4-5 (1 point, 2 linear. 밉 0은 밉맵 없음)"""
+    wrap_u, wrap_v, _, compare, _, _, flt = struct.unpack_from('<6BH', info)
+    # LOD bias(와이퍼 M_Stamp 2cl −1)와 1 이상인 최대 LOD(오더 브러시 M_Plastic 2cl 10)는 glTF·WebGL에 넣을 자리가 없어서 버림
+    min_lod, max_lod, _ = struct.unpack_from('<3f', info, 8)
+    assert compare == 0 and min_lod == 0, (compare, min_lod)
+    mip, mag, shrink = flt & 3, flt >> 2 & 3, flt >> 4 & 3
+    # 최대 LOD < 0.5에 밉 point면 늘 밉 0만 씀 = 밉맵 없음 (크래시 블래스터 M_Body_Alb 0.4)
+    if max_lod < 0.5:
+        assert mip == 1, (mip, max_lod)
+        mip = 0
+    min_filter = {(1, 0): 9728, (2, 0): 9729, (1, 1): 9984, (2, 1): 9985, (1, 2): 9986, (2, 2): 9987}[shrink, mip]
+    return {'magFilter': {1: 9728, 2: 9729}[mag], 'minFilter': min_filter, 'wrapS': GL_WRAP[wrap_u], 'wrapT': GL_WRAP[wrap_v]}
+
+
+def decode_png(data):
+    """8비트 non-interlaced PNG → (가로, 세로, 채널 수, 픽셀 bytes)"""
+    w, h, depth, ctype, _, _, interlace = struct.unpack_from('>IIBBBBB', data, 16)
+    assert data[:8] == b'\x89PNG\r\n\x1a\n' and depth == 8 and interlace == 0
+    ch = {0: 1, 2: 3, 4: 2, 6: 4}[ctype]
+    idat, p = b'', 8
+    while p < len(data):
+        n, kind = struct.unpack_from('>I4s', data, p)
+        if kind == b'IDAT':
+            idat += data[p + 8:p + 8 + n]
+        p += 12 + n
+    raw, stride = zlib.decompress(idat), w * ch
+    out, prev = bytearray(), bytearray(stride)
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - ch] if i >= ch else 0
+            c = prev[i - ch] if i >= ch else 0
+            if f == 1:
+                line[i] = line[i] + a & 255
+            elif f == 2:
+                line[i] = line[i] + prev[i] & 255
+            elif f == 3:
+                line[i] = line[i] + (a + prev[i] >> 1) & 255
+            elif f == 4:
+                pa, pb, pc = abs(prev[i] - c), abs(a - c), abs(a + prev[i] - 2 * c)
+                line[i] = line[i] + (a if pa <= pb and pa <= pc else prev[i] if pb <= pc else c) & 255
+        out += line
+        prev = line
+    return w, h, ch, bytes(out)
+
+
+def encode_gray_png(px, w, h):
+    """8비트 회색 PNG. 줄마다 필터 5종 중 절댓값 합이 가장 작은 것 (BfrAss와 같은 방식), zlib 9"""
+    raw, prev = bytearray(), bytes(w)
+    for y in range(h):
+        row = px[y * w:(y + 1) * w]
+        left, upleft = bytes(1) + row[:-1], bytes(1) + prev[:-1]
+        def paeth(a, b, c):
+            pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+            return a if pa <= pb and pa <= pc else b if pb <= pc else c
+        candidates = (row, bytes(x - a & 255 for x, a in zip(row, left)), bytes(x - b & 255 for x, b in zip(row, prev)),
+                      bytes(x - (a + b >> 1) & 255 for x, a, b in zip(row, left, prev)),
+                      bytes(x - paeth(a, b, c) & 255 for x, a, b, c in zip(row, left, prev, upleft)))
+        best = min(range(5), key=lambda f: sum(v if v < 128 else 256 - v for v in candidates[f]))
+        raw.append(best)
+        raw += candidates[best]
+        prev = row
+    chunk = lambda kind, body: struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+    return (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 0, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(bytes(raw), 9)) + chunk(b'IEND', b''))
+
+
+def gray_png(png):
+    """BC4 1채널 텍스처는 채널 매핑이 RRRR라서 BfrAss가 R=G=B=A인 RGBA PNG로 쓴다 (R=G=B인 RGB도 있음).
+    게임 셰이더는 이 텍스처들의 x만 읽으므로 회색 PNG로 바꿔도 결과가 같다. 해당하지 않으면 None"""
+    w, h, ch, px = decode_png(png)
+    if ch < 3:
+        return None
+    r = px[0::ch]
+    if r != px[1::ch] or r != px[2::ch] or (ch == 4 and px[3::ch] != r and px[3::ch] != b'\xff' * (w * h)):
+        return None
+    return encode_gray_png(r, w, h)
+
+
+def compact_binary(gltf, binary):
+    """쓰지 않는 텍스처를 빼고, 1채널 PNG를 회색으로 바꾸고, bufferView를 다시 이어 붙인 binary를 돌려준다"""
+    def refs(mat):  # 머티리얼이 가리키는 텍스처 정보 전부 (BfrAss가 채운 emissiveTexture 등 표준 슬롯 포함)
+        pbr = mat['pbrMetallicRoughness']
+        return [*mat['extras']['s3']['textures'].values(), *(mat[k] for k in ('normalTexture', 'occlusionTexture', 'emissiveTexture') if k in mat),
+                *(pbr[k] for k in ('baseColorTexture', 'metallicRoughnessTexture') if k in pbr)]
+    used = sorted({info['index'] for mat in gltf.get('materials', []) for info in refs(mat)})
+    for mat in gltf.get('materials', []):
+        for info in refs(mat):
+            info['index'] = used.index(info['index'])
+    gltf['textures'] = [gltf['textures'][i] for i in used]
+    if not gltf['textures']:
+        del gltf['textures']
+    images = sorted({t['source'] for t in gltf.get('textures', [])})
+    samplers = sorted({t['sampler'] for t in gltf.get('textures', [])})
+    for t in gltf.get('textures', []):
+        t['source'], t['sampler'] = images.index(t['source']), samplers.index(t['sampler'])
+    gltf['images'] = [gltf['images'][i] for i in images]
+    gltf['samplers'] = [gltf['samplers'][i] for i in samplers]
+    for key in ('images', 'samplers'):
+        if not gltf[key]:
+            del gltf[key]
+    data = {}
+    for im in gltf.get('images', []):
+        v = gltf['bufferViews'][im['bufferView']]
+        png = bytes(binary[v.get('byteOffset', 0):v.get('byteOffset', 0) + v['byteLength']])
+        data[im['bufferView']] = gray_png(png) or png
+    views = sorted({im['bufferView'] for im in gltf.get('images', [])} | {a['bufferView'] for a in gltf['accessors'] if 'bufferView' in a})
+    out = bytearray()
+    new_views = []
+    for i in views:
+        v = dict(gltf['bufferViews'][i])
+        chunk = data.get(i) or binary[v.get('byteOffset', 0):v.get('byteOffset', 0) + v['byteLength']]
+        out += b'\0' * (-len(out) % 4)
+        v['byteOffset'], v['byteLength'] = len(out), len(chunk)
+        out += chunk
+        new_views.append(v)
+    for a in gltf['accessors']:
+        if 'bufferView' in a:
+            a['bufferView'] = views.index(a['bufferView'])
+    for im in gltf.get('images', []):
+        im['bufferView'] = views.index(im['bufferView'])
+    gltf['bufferViews'] = new_views
+    gltf['buffers'][0]['byteLength'] = len(out)
+    return out
 
 
 def load_animations(bfres):
@@ -237,9 +417,22 @@ def animation_names(stem):
     return ANIMATIONS + next((v for prefix, v in ANIMATIONS_BY_PREFIX.items() if stem.startswith(prefix)), ())
 
 
-def add_animations(gltf, binary, anims, names):
+def base_differs(node, data):
+    """애니메이션 기준값이 바인드 자세(노드 T/R/S)와 다른지"""
+    if 'Scale' in data['flagsBase'] and any(abs(a - b) > 1e-4 for a, b in zip(data['baseScale'], node['scale'])):
+        return True
+    if 'Translate' in data['flagsBase'] and any(abs(a - b) > 1e-4 for a, b in zip(data['baseTranslate'], node['translation'])):
+        return True
+    if 'Rotate' in data['flagsBase']:
+        q = euler_xyz_to_quat(*data['baseRotate'][:3])
+        return abs(sum(a * b for a, b in zip(q, node['rotation']))) < 1 - 1e-6
+    return False
+
+
+def add_animations(gltf, binary, anims, names, static_bones=False):
     """게임 스켈레탈 애니메이션을 glTF 애니메이션으로. 커브가 있는 본만 넣고(여러 애니메이션을 동시에 재생해도 서로 덮어쓰지 않게),
-    그 본의 T/R/S는 커브가 없는 성분도 애니메이션 기준값으로 채운다 (기준값이 바인드 자세와 조금 다를 수 있음)"""
+    그 본의 T/R/S는 커브가 없는 성분도 애니메이션 기준값으로 채운다 (기준값이 바인드 자세와 조금 다를 수 있음)
+    static_bones: 커브가 없어도 기준값이 바인드 자세와 다른 본도 넣음 (STATIC_BONE_PREFIXES)"""
     joints = {node['name']: i for i, node in enumerate(gltf['nodes']) if 'mesh' not in node}
     for name in names:
         anim = anims['skeletal'].get(name)
@@ -247,7 +440,8 @@ def add_animations(gltf, binary, anims, names):
             continue
         assert anim['flagsRotate'] == 'EulerXYZ', anim['flagsRotate']
         # 모델에 없는 본은 움직일 대상이 없으므로 무시 (예: 오더 롤러에는 Bench가 없음)
-        bones = {b: d for b, d in anim['bones'].items() if b in joints and d['curves']}
+        bones = {b: d for b, d in anim['bones'].items()
+                 if b in joints and (d['curves'] or (static_bones and base_differs(gltf['nodes'][joints[b]], d)))}
         if not bones:
             continue
         frames = sample_frames(anim['frameCount'])
@@ -272,6 +466,59 @@ def add_animations(gltf, binary, anims, names):
                 samplers.append({'input': times, 'output': add_accessor(gltf, binary, samples[comp], kind), 'interpolation': 'LINEAR'})
                 channels.append({'sampler': len(samplers) - 1, 'target': {'node': joints[bone], 'path': path}})
         gltf.setdefault('animations', []).append({'name': name, 'channels': channels, 'samplers': samplers})
+
+
+def accessor_view(gltf, acc):
+    """float accessor → (바이너리 안 시작 위치, 성분 수)"""
+    a = gltf['accessors'][acc]
+    assert a['componentType'] == 5126, a
+    return gltf['bufferViews'][a['bufferView']]['byteOffset'] + a.get('byteOffset', 0), {'SCALAR': 1, 'VEC3': 3, 'VEC4': 4}[a['type']]
+
+
+def read_vectors(gltf, binary, acc):
+    start, width = accessor_view(gltf, acc)
+    flat = struct.unpack_from(f'<{gltf["accessors"][acc]["count"] * width}f', binary, start)
+    return [list(flat[i:i + width]) for i in range(0, len(flat), width)]
+
+
+def compensate_segment_scale(gltf, binary):
+    """게임 스켈레톤(스케일 모드 Maya)의 SSC 본은 부모 스케일을 물려받지 않고, 위치만 부모 스케일만큼 늘어난다.
+    glTF에는 SSC가 없어서 자식이 부모 스케일을 그대로 물려받는다 (예: 파블로 Open/Close에서 Brush_1·Brush_2 스케일이 털 끝까지 겹쳐 곱해짐).
+    애니메이션이 스케일을 바꾸는 본 P와 그 SSC 자식 C 사이에 노드를 끼워 스케일 1/S_P를 걸고, C의 위치에 S_P를 곱해 굽는다:
+    world(C) = world(P 이동·회전)·S_P·S_P⁻¹·T(S_P·t_C)·R_C·S_C = world(P 이동·회전)·T(S_P·t_C)·R_C·S_C (게임 식과 같음).
+    본 flags는 BfrAss가 노드 extras에 넣어 둔다. 바인드 자세는 BfrAss가 처리하므로 바인드 스케일이 1인 본만 다룬다 (아니면 에러)"""
+    nodes = gltf['nodes']
+    anims = [(anim, {(c['target']['node'], c['target']['path']): anim['samplers'][c['sampler']] for c in anim['channels']})
+             for anim in gltf.get('animations', [])]
+    scaled = {p for _, chans in anims for (p, path), s in chans.items()
+              if path == 'scale' and any(abs(x - 1) > 1e-6 for v in read_vectors(gltf, binary, s['output']) for x in v)}
+    pairs = []  # (P, C, 끼운 노드)
+    for p in sorted(scaled):
+        for c in [c for c in nodes[p].get('children', []) if int(nodes[c].get('extras', {}).get('bfres.bone.flags', '0'), 16) & SSC_FLAG]:
+            assert all(abs(x - 1) < 1e-6 for x in nodes[p]['scale']), nodes[p]
+            nodes.append({'name': nodes[c]['name'] + '_SSC', 'translation': [0, 0, 0], 'rotation': [0, 0, 0, 1], 'scale': [1, 1, 1], 'children': [c]})
+            nodes[p]['children'][nodes[p]['children'].index(c)] = len(nodes) - 1
+            pairs.append((p, c, len(nodes) - 1))
+    for anim, chans in anims:
+        for p, c, k in pairs:
+            scale = chans.get((p, 'scale'))
+            if scale is None:
+                # 부모 스케일이 안 움직이는 애니메이션이 자식 위치만 움직이면 그때의 부모 스케일을 알 수 없음. 무기에는 없는 경우
+                assert (c, 'translation') not in chans, (anim['name'], nodes[c]['name'])
+                continue
+            s = read_vectors(gltf, binary, scale['output'])
+            inverse = add_accessor(gltf, binary, [[1 / x for x in v] for v in s], 'VEC3')
+            anim['samplers'].append({'input': scale['input'], 'output': inverse, 'interpolation': 'LINEAR'})
+            anim['channels'].append({'sampler': len(anim['samplers']) - 1, 'target': {'node': k, 'path': 'scale'}})
+            t = chans.get((c, 'translation'))
+            if t is None:
+                t = {'input': scale['input'], 'output': add_accessor(gltf, binary, [nodes[c]['translation']] * len(s), 'VEC3'), 'interpolation': 'LINEAR'}
+                anim['samplers'].append(t)
+                anim['channels'].append({'sampler': len(anim['samplers']) - 1, 'target': {'node': c, 'path': 'translation'}})
+            assert t['input'] == scale['input'], anim['name']
+            start, _ = accessor_view(gltf, t['output'])
+            values = [x * y for v, sv in zip(read_vectors(gltf, binary, t['output']), s) for x, y in zip(v, sv)]
+            struct.pack_into(f'<{len(values)}f', binary, start, *values)
 
 
 def add_visibility_animations(gltf, anims, shape_bones, names):
@@ -402,8 +649,10 @@ def build_file(bfres, out_dir, work, taken):
     results = []
     for model, mats in models.items():
         tmp = os.path.join(work, model + '.glb')
-        out_text = run('convert', bfres, '-m', model, '-o', tmp, '--mat-info', '--debug', *extra)
+        # 정점 컬러는 빼고 변환: 무기 셰이더 프로그램 265개의 정점 입력에 _c0이 없음 (디컴파일로 확인)
+        out_text = run('convert', bfres, '-m', model, '-o', tmp, '--mat-info', '--debug', '--no-vertex-colors', *extra)
         mat_info = parse_mat_info(out_text)
+        mat_samplers = material_samplers(bfres, out_text, model)
         shapes = parse_shape_visibility(out_text)[model]
         shape_bones = {shape: bone for shape, (_, bone) in shapes.items()}
         gltf, binary = read_glb(tmp)
@@ -421,7 +670,8 @@ def build_file(bfres, out_dir, work, taken):
             node.setdefault('translation', [0, 0, 0])
             node.setdefault('rotation', [0, 0, 0, 1])
             node.setdefault('scale', [1, 1, 1])
-        add_animations(gltf, binary, anims, names)
+        add_animations(gltf, binary, anims, names, model.startswith(STATIC_BONE_PREFIXES))
+        compensate_segment_scale(gltf, binary)
         add_visibility_animations(gltf, anims, shape_bones, names)
         for node in gltf['nodes']:
             if 'mesh' in node and not shapes[node['name']][0]:
@@ -433,12 +683,20 @@ def build_file(bfres, out_dir, work, taken):
             for shader_sampler, mat_sampler in info['samplers'].items():
                 if mat_sampler in mats[name]:
                     tex_name = mats[name][mat_sampler]
-                    textures[shader_sampler] = {'index': texture_for(gltf, binary, tex_name, tex_dirs), 'name': tex_name}
+                    sampler = mat_samplers[name][mat_sampler]
+                    textures[shader_sampler] = {'index': texture_for(gltf, binary, tex_name, tex_dirs, sampler), 'name': tex_name}
             s3 = {'shader': info['shader'], 'textures': textures, 'options': info['options']}
             # 셰이더 정점 입력이 이름이 다른 정점 속성을 읽는 경우만 기록 (예: 소이 튜버 M_Body는 셰이더의 _u2 자리에 _u0을 넣음)
             if remap := {k: v for k, v in info['attributes'].items() if k != v}:
                 s3['attributes'] = remap
             render, params, opts = info['render'], info['params'], info['options']
+            # 양면: display_face both면 컬링 없음 (Hoian GXConverter). 무기에는 front와 both만 있음
+            assert render['gsys_render_state_display_face'] in ('front', 'both'), (name, render)
+            if render['gsys_render_state_display_face'] == 'both':
+                mat['doubleSided'] = True
+            # 그림자만 드리우고 화면에는 안 그리는 머티리얼 (예: 스파이 가젯·도돌이 우산 M_Shadow)
+            if render.get('gsys_dynamic_depth_shadow_only') == '1':
+                s3['shadow_only'] = True
             used = {}
             if render['gsys_render_state_mode'] != 'opaque':  # translucent / mask / custom
                 s3['render'] = {
@@ -465,6 +723,8 @@ def build_file(bfres, out_dir, work, taken):
                         used[k] = params[k][0] if len(params[k]) == 1 else params[k][:3]
             if used:
                 s3['params'] = used
+            if model.startswith(TEX_SRT_PREFIXES):
+                s3['tex_srt'] = {k: v for k, v in info['tex_srt'].items() if k in ('tex_mtx0', 'tex_mtx1')}
             if param_anims := material_param_animations(anims, name, names):
                 s3['param_anims'] = param_anims
             mat.setdefault('extras', {})['s3'] = s3
@@ -476,6 +736,7 @@ def build_file(bfres, out_dir, work, taken):
                 pbr['baseColorTexture'] = {'index': textures['_a0']['index']}
             if '_n0' in textures:
                 mat['normalTexture'] = {'index': textures['_n0']['index']}
+        binary = compact_binary(gltf, binary)
         # 다른 bfres 파일과 모델 이름이 겹치면 (예: Charger_LongB 안의 모델 이름이 Charger_Long) 파일 이름으로 저장해 덮어쓰지 않게 한다
         name = stem if model != stem and model in taken else model
         out = os.path.join(out_dir, name + '.glb')
