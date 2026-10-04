@@ -51,7 +51,7 @@
             pointer-events: none;
         }
         #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel, #shader-panel, #anim-bar, #export-panel { pointer-events: auto; }
-        #category-wrap { position: relative; max-width: 100%; } /* 카테고리 바·animBar의 max-width 기준 (화면 폭) */
+        #category-wrap { position: relative; max-width: calc(100% - 2 * (var(--ink-w, 0px) + 10px)); } /* 카테고리 바·animBar의 max-width 기준 (화면 폭에서 우하단 잉크 색 패널 자리를 양쪽으로 뺀 폭) */
         #anim-bar { /* 임시: 모델 애니메이션 조작. 카테고리 바 바로 위에 띄워서 레이아웃 높이에 넣지 않음 (나타나고 사라져도 좌측 패널·잉크 색 위치가 그대로) */
             position: absolute;
             bottom: calc(100% + 10px);
@@ -75,23 +75,20 @@
         }
         #anim-bar > * { flex-shrink: 0; }
         #anim-bar[hidden], #anim-bar [hidden] { display: none; }
-        /* 우측 패널 묶음: [셰이더] 옆에 [조명 위, 회전 아래] 세로 묶음. 서로 겹치지 않고, 아래쪽을 잉크 색 패널 바로 위에 맞춤 (bottom은 main.js에서 계산)
-           셰이더 패널을 옆에 둬서 픽셀 옵션이 펼쳐져도 위로 넘치지 않음 */
+        /* 우측 패널 묶음: 셰이더·저장·조명·회전을 한 줄로 세로로 쌓고, 아래쪽을 우하단 잉크 색 패널 바로 위에 맞춤 (bottom·max-height는 main.js에서 계산)
+           화면 높이가 모자라면 셰이더 패널만 줄어들고 그 안에서 스크롤 (픽셀 옵션이 펼쳐져도 화면 위로 넘치지 않음) */
         #right-stack {
             position: absolute;
             right: 20px;
             bottom: 150px;
             display: flex;
+            flex-direction: column;
             align-items: flex-end;
             gap: 10px;
             pointer-events: none;
         }
-        #right-col {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 10px;
-        }
+        #right-stack > * { flex-shrink: 0; }
+        #right-stack > #shader-panel { flex-shrink: 1; min-height: 0; overflow-y: auto; }
         #shader-panel label, #light-panel label { display: block; }
         #shader-panel [hidden] { display: none; }
         #export-panel { display: flex; flex-direction: column; gap: 6px; }
@@ -177,8 +174,12 @@
             transition: background 0.2s;
         }
         #model-list li:hover { background: #555; }
+        /* 잉크 색 패널은 우하단 구석(카테고리 바 오른쪽)에 붙임. 카테고리 바는 가운데 정렬을 유지한 채 양쪽에서 이 패널 폭만큼 비켜서 겹치지 않음 (--ink-w는 main.js에서 계산) */
+        #bottom-bar { position: relative; }
         #color-picker-container {
-            align-self: flex-end;
+            position: absolute;
+            right: 0;
+            bottom: 0;
             background: rgba(0, 0, 0, 0.7);
             padding: 15px;
             border-radius: 10px;
@@ -320,7 +321,7 @@
     </style>
 </head>
 <body>
-    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.6</div></div>
+    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.6.2</div></div>
     <div id="ui">
         <div id="side-panel" class="collapsible left">
             <h2 id="list-title">무기</h2>
@@ -438,7 +439,6 @@
                 <label><input type="checkbox" id="pixel-dither"> 디더링</label>
             </div>
         </div>
-        <div id="right-col">
         <div id="export-panel">
             <div class="row"><button id="save-png">PNG 저장</button> <label><input type="checkbox" id="export-crop" checked> 여백 자르기</label></div>
             <div class="row">움짤
@@ -477,7 +477,6 @@
             <label class="axis-z">Z <input type="number" id="rot-z" step="1"> °</label>
             <button id="rot-reset">무기 정면</button>
             <button id="view-reset">시점 초기화</button>
-        </div>
         </div>
         </div>
     </div>

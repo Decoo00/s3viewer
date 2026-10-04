@@ -2033,12 +2033,16 @@ function animate(timestamp) {
 }
 animate();
 
-// 우측 패널 묶음(셰이더·조명·회전)을 잉크 색 패널 바로 위에 둠. 패널 높이가 바뀌어도 위로만 늘어나서 잉크 색 패널과 안 겹침
+// 우측 패널 묶음(셰이더·저장·조명·회전)을 우하단 잉크 색 패널 바로 위에 둠. 패널 높이가 바뀌어도 위로만 늘어나서 잉크 색 패널과 안 겹치고,
+// 화면 위쪽 여백(20px)을 넘지 않게 max-height를 걸어 둠 (넘치면 셰이더 패널만 줄어듦). 카테고리 바는 잉크 색 패널 폭(--ink-w)만큼 비켜 감
 const rightStack = document.getElementById('right-stack');
 const colorPickerPanel = document.getElementById('color-picker-container');
 function placeRightStack() {
     const ui = rightStack.offsetParent.getBoundingClientRect();
-    rightStack.style.bottom = `${ui.bottom - colorPickerPanel.getBoundingClientRect().top + 10}px`;
+    const ink = colorPickerPanel.getBoundingClientRect();
+    rightStack.style.bottom = `${ui.bottom - ink.top + 10}px`;
+    rightStack.style.maxHeight = `${Math.max(0, ink.top - 10 - ui.top - 20)}px`;
+    document.documentElement.style.setProperty('--ink-w', `${ink.width}px`);
 }
 new ResizeObserver(placeRightStack).observe(colorPickerPanel);
 window.addEventListener('resize', placeRightStack);
