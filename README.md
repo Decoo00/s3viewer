@@ -42,7 +42,7 @@ It runs right in the browser with no installation, and is built to stay lightwei
 
 ### Weapons
 - Every main weapon category in Splatoon 3, as of v11.3.0
-- 
+
 ### Rendering
 - Rendering that follows the game's shader rules as closely as possible
 - Shader modes: In-game / Pixel / Line art / Cartoon
