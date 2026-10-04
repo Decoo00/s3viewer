@@ -3,8 +3,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { editor, cropFrame, savePng, safeName, openSequenceEditor } from './export.js';
+import { t, setText, categoryName, weaponName, englishWeaponName, onLangChange, mountLangPicker } from './i18n.js';
 
 /**
  * TODO
@@ -286,60 +286,28 @@ const pmremGenerator = new THREE.PMREMGenerator(renderer);
 pmremGenerator.compileEquirectangularShader();
 
 // 조명 프리셋: 기본 = 위의 직접 조명들 + 빈 환경맵, 스튜디오 = RoomEnvironment 환경맵만 (금속 반사용)
-// HDRI = 배경과 조명(환경맵)을 같은 HDRI 한 장으로. 파일은 처음 선택할 때만 받음 (Poly Haven, CC0. three.js 예제에 포함된 1k 버전)
+// (HDRI 프리셋 쇼핑몰·채석장·바다 노을은 사용자 요청으로 뺌)
 const directLights = [hemiLight, dirLight, dirLight2, bottomLight, bottomLight2, ambientLight];
 const LIGHT_PRESETS = {
     default: { environment: pmremGenerator.fromScene(new THREE.Scene()).texture, directLights: true },
     studio: { environment: pmremGenerator.fromScene(new RoomEnvironment()).texture, directLights: false },
     // 인게임 = 게임 장비 뷰어의 주광 + SH + 큐브 (위 gameLight, gameEnv). 출력은 Hoian Viewer와 같은 pow(1/2.2) (CustomToneMapping, 톤맵 곡선 없음)
     game: { directLights: false, inGame: true },
-    esplanade: { hdri: 'hdri/royal_esplanade_1k.hdr' },
-    quarry: { hdri: 'hdri/quarry_01_1k.hdr' },
-    sunset: { hdri: 'hdri/venice_sunset_1k.hdr' },
 };
-const HDRI_BLUR = 0.1; // 배경 흐림 정도 (0 = 선명, 1 = 최대)
-const hdriCache = new Map();
-function loadHdri(path) {
-    if (!hdriCache.has(path)) {
-        hdriCache.set(path, new HDRLoader().loadAsync(path).then((texture) => {
-            texture.mapping = THREE.EquirectangularReflectionMapping;
-            return texture;
-        }));
-    }
-    return hdriCache.get(path);
-}
 // 배경 색: 잉크 색 아래 색 선택 (프리셋 흰색·밝은 회색·회색·어두운 회색·검은색 + 직접 고르기). 기본은 원래 배경색 #a0a0a0
-// HDRI 조명 프리셋은 HDRI 하늘이 배경. 'HDRI 배경'을 끄거나 배경 색을 고르면 조명은 HDRI 그대로 두고 배경만 색으로
 const bgColorInput = document.getElementById('bg-color-input');
-const hdriBgToggle = document.getElementById('hdri-bg');
-const hdriBgLabel = document.getElementById('hdri-bg-label');
-let currentHdri = null;
-function applyBackground() {
-    scene.background = currentHdri && hdriBgToggle.checked ? currentHdri : BACKGROUND_COLOR;
-    scene.backgroundBlurriness = scene.background === currentHdri ? HDRI_BLUR : 0;
-    hdriBgLabel.hidden = !currentHdri;
-}
-bgColorInput.addEventListener('input', () => {
-    BACKGROUND_COLOR.set(bgColorInput.value);
-    hdriBgToggle.checked = false;
-    applyBackground();
-});
-hdriBgToggle.addEventListener('change', applyBackground);
+bgColorInput.addEventListener('input', () => BACKGROUND_COLOR.set(bgColorInput.value));
 let presetSeq = 0;
 async function applyLightPreset(name) {
     const seq = ++presetSeq;
-    const preset = LIGHT_PRESETS[name];
-    const hdri = preset.hdri ? await loadHdri(preset.hdri) : null;
+    const preset = LIGHT_PRESETS[name] ?? LIGHT_PRESETS.game; // 없는 값(브라우저가 기억한 옛 선택 등)이면 인게임
     if (preset.inGame) await loadGameEnvAtlas();
     if (seq !== presetSeq) return; // 받는 동안 다른 프리셋이 선택됨
-    scene.environment = hdri ?? preset.environment ?? null;
-    currentHdri = hdri;
-    applyBackground();
-    // HDRI는 1보다 밝은 값(해, 하늘)이 있어서 tone mapping으로 눌러야 자연스러움
-    renderer.toneMapping = hdri ? THREE.ACESFilmicToneMapping : preset.inGame ? THREE.CustomToneMapping : THREE.NoToneMapping;
+    scene.environment = preset.environment ?? null;
+    renderer.toneMapping = preset.inGame ? THREE.CustomToneMapping : THREE.NoToneMapping;
     renderer.toneMappingExposure = preset.inGame ? GAME_EXPOSURE : 1;
-    floor.visible = FLOOR_ENABLED && !hdri; // 회색 바닥은 HDRI 배경과 안 어울림
-    for (const light of directLights) light.visible = !hdri && preset.directLights;
+    floor.visible = FLOOR_ENABLED;
+    for (const light of directLights) light.visible = preset.directLights;
     gameLight.visible = !!preset.inGame;
     gameEnv.s3EnvOn.value = preset.inGame ? 1 : 0;
 }
@@ -347,18 +315,16 @@ const lightSelect = document.getElementById('light-preset');
 lightSelect.addEventListener('change', () => applyLightPreset(lightSelect.value));
 applyLightPreset(lightSelect.value);
 
-// 조명 방향: 수직축 기준으로 직접 조명, 환경맵(조명), HDRI 배경을 함께 돌림. 무기 회전과 따로 빛 방향을 정할 수 있음
+// 조명 방향: 수직축 기준으로 직접 조명, 환경맵(조명)을 함께 돌림. 무기 회전과 따로 빛 방향을 정할 수 있음
 const lightAngle = document.getElementById('light-angle');
 const rad = THREE.MathUtils.degToRad(lightAngle.valueAsNumber);
 lightRig.rotation.y = rad;
 scene.environmentRotation.y = rad;
-scene.backgroundRotation.y = rad;
 gameEnv.s3EnvRot.value.setFromMatrix4(new THREE.Matrix4().makeRotationY(-rad));
 lightAngle.addEventListener('input', () => {
     const rad = THREE.MathUtils.degToRad(lightAngle.valueAsNumber);
     lightRig.rotation.y = rad;
     scene.environmentRotation.y = rad;
-    scene.backgroundRotation.y = rad;
     gameEnv.s3EnvRot.value.setFromMatrix4(new THREE.Matrix4().makeRotationY(-rad));
 });
 
@@ -507,7 +473,7 @@ const modeButton = document.getElementById('rot-mode');
 modeButton.addEventListener('click', () => {
     gizmo.enabled = !gizmo.enabled;
     gizmo.getHelper().visible = gizmo.enabled;
-    modeButton.textContent = gizmo.enabled ? '모드: 축 회전' : '모드: 자유 회전';
+    setText(modeButton, gizmo.enabled ? 'rot.modeAxis' : 'rot.modeFree');
 });
 
 // 자동 회전: 월드 Y축(화면 위쪽) 기준 턴테이블 회전
@@ -519,25 +485,24 @@ let autoRotate = false;
 const autoButton = document.getElementById('rot-auto');
 autoButton.addEventListener('click', () => {
     autoRotate = !autoRotate;
-    autoButton.textContent = autoRotate ? '자동 회전: 켬' : '자동 회전: 끔';
+    setText(autoButton, autoRotate ? 'rot.autoOn' : 'rot.autoOff');
     speedSlider.parentElement.hidden = !autoRotate; // 속도 슬라이더는 자동 회전 중에만 표시
 });
 
 // 패널 숨기기/펼치기 (애니메이션과 아이콘 방향은 CSS의 collapsed 클래스가 담당)
-const help = document.getElementById('controls-help');
+// 패널마다 접힘 상태를 localStorage에 기억. 기억한 값이 없으면 좁은 화면(폭 600px 이하)에서는 우측 패널 묶음을 접은 채로 시작 (무기 목록을 가리지 않게)
+const COLLAPSE_KEY = 's3viewer-collapsed';
+let collapsedSaved = {};
+try { collapsedSaved = JSON.parse(localStorage.getItem(COLLAPSE_KEY)) ?? {}; } catch { /* 기억 없이 기본값 */ }
+const narrowScreen = matchMedia('(max-width: 600px)').matches;
 for (const btn of document.querySelectorAll('.toggle-btn')) {
-    if (btn.parentElement === help) continue;
-    btn.addEventListener('click', () => btn.parentElement.classList.toggle('collapsed'));
+    const panel = btn.parentElement;
+    panel.classList.toggle('collapsed', collapsedSaved[panel.id] ?? (narrowScreen && panel.closest('#right-stack') !== null));
+    btn.addEventListener('click', () => {
+        collapsedSaved[panel.id] = panel.classList.toggle('collapsed');
+        try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsedSaved)); } catch { /* 기억만 못 함 */ }
+    });
 }
-
-// 조작 가이드: 접속 시 3초 보여준 뒤 숨김, 버튼으로 다시 열면 3초 뒤 다시 숨김
-const HELP_SHOW_MS = 3000;
-let helpTimer = setTimeout(() => help.classList.add('collapsed'), HELP_SHOW_MS);
-help.querySelector('.toggle-btn').addEventListener('click', () => {
-    clearTimeout(helpTimer);
-    if (help.classList.toggle('collapsed')) return; // 보이던 중에 누르면 바로 숨김
-    helpTimer = setTimeout(() => help.classList.add('collapsed'), HELP_SHOW_MS);
-});
 
 
 
@@ -580,6 +545,16 @@ function hideAnimControls() {
 function updateAnimBar() {
     animBar.hidden = animControls.every((control) => control.hidden);
 }
+// animBar 글자(index.html의 data-i18n-cat)는 무기군마다 따로: i18n.js 키 '<무기군>.<이름>' (예: blaster.fire, charger.fire). 같은 한국어라도 무기군마다 번역을 따로 정함
+let animCat = 'shooter';
+function setCatText(el, base) {
+    el.dataset.i18nCat = base;
+    setText(el, `${animCat}.${base}`);
+}
+function relabelAnimBar(path) {
+    animCat = path.match(/Wmn_([A-Za-z]+)_/)[1].toLowerCase();
+    for (const el of animBar.querySelectorAll('[data-i18n-cat]')) setCatText(el, el.dataset.i18nCat);
+}
 
 // 모델 애니메이션 (게임 데이터, tools/build_glb.py가 glb에 넣음)
 // - 두 상태 전환(SWITCHES): 'Open'/'Close' (롤러 접기/펴기, 붓 대기/밀기. 무기군마다 prefix로 따로), 'TransformToWait'/'TransformToAttack' (빈센트), 'Shot_Long_St'/'Shot_Short_St' (소방 FF 사격 모드).
@@ -596,20 +571,22 @@ function updateAnimBar() {
 let mixers = [];
 const uvProxies = []; // {proxy, material}: tex_mtx0 이동을 proxy.position으로 재생해서 매 프레임 텍스처에 반영
 const animBar = document.getElementById('anim-bar');
-// 버튼을 누르면 반대쪽 클립을 한 번 재생하고 끝 자세를 유지. 첫 클립의 끝 자세로 시작하고, labels[상태]가 버튼 글자
+// 버튼을 누르면 반대쪽 클립을 한 번 재생하고 끝 자세를 유지. 첫 클립의 끝 자세로 시작하고, labels[상태]가 버튼 글자 (i18n.js 키)
 // prefix: 이 무기군 파일에만 적용 (롤러·붓·셸터는 같은 Open/Close 이름이라도 동작이 달라서 무기군마다 따로 둠)
 // rest: 첫 클립의 끝 자세가 바인드 자세와 같아서 처음에 재생하지 않음 (빈센트 TransformToWait 끝 = 바인드. 재생해 두면 털 클립과 섞임, 아래 참고)
 const SWITCHES = [
-    { button: document.getElementById('fold-toggle'), clips: ['Open', 'Close'], labels: ['접기', '펴기'], prefix: 'Wmn_Roller_' },
+    { button: document.getElementById('fold-toggle'), clips: ['Open', 'Close'], labels: ['roller.fold', 'roller.unfold'], prefix: 'Wmn_Roller_' },
     // 붓: Close 끝 = 대기(털 모임)가 기본, Open 끝 = 밀기(털 벌어짐)
-    { button: document.getElementById('brush-toggle'), clips: ['Close', 'Open'], labels: ['밀기', '대기'], prefix: 'Wmn_Brush_' },
-    { button: document.getElementById('shot-toggle'), clips: ['Shot_Long_St', 'Shot_Short_St'], labels: ['단거리 모드로', '장거리 모드로'] },
-    { button: document.getElementById('pose-toggle'), clips: ['TransformToWait', 'TransformToAttack'], labels: ['공격 모드', '대기 자세'], prefix: 'Wmn_Brush_', rest: true },
+    { button: document.getElementById('brush-toggle'), clips: ['Close', 'Open'], labels: ['brush.push', 'brush.wait'], prefix: 'Wmn_Brush_' },
+    { button: document.getElementById('shot-toggle'), clips: ['Shot_Long_St', 'Shot_Short_St'], labels: ['shot.toShort', 'shot.toLong'] },
+    { button: document.getElementById('pose-toggle'), clips: ['TransformToWait', 'TransformToAttack'], labels: ['brush.toAttack', 'brush.toWait'], prefix: 'Wmn_Brush_', rest: true },
     // 셸터: Open 끝 = 펼친 상태가 기본 (게임 OpenFully 기준값과 차이 0.2% 이내, fska_dump로 비교), Close 끝 = 접힌 우산 모델(Umbrella_Close)만 보임.
     // 사출(shelterEject, 아래 loadGlb) 중에는 안 씀. 베어표 셸터는 애니메이션이 없어서 안 나옴
     // fillVis: 도돌이 우산은 Open에 보임/숨김 커브가 없어서 펼친 상태에서 접힌 우산도 보였음. Close의 첫 프레임(= 펼친 상태)에서 Umbrella_Close가 숨겨져 있으므로
     //   한쪽 클립에 없는 보임/숨김 트랙은 반대쪽 클립의 첫 값으로 채움 (반대쪽 클립은 이 클립의 끝 상태에서 시작함)
-    { button: document.getElementById('shelter-toggle'), clips: ['Open', 'Close'], labels: ['접기', '펴기'], prefix: 'Wmn_Shelter_', when: () => !shelterEject, fillVis: true },
+    // endFrame: 이 파일들은 두 클립을 해당 프레임에서 끝냄. 도돌이 우산은 게임 원본 Open·Close(15프레임)의 마지막 15프레임 키가 바인드 값으로 튐
+    //   (Close: Slider 0.404 → 0.654 등 접힌 자세가 펼친 자세로, Open: Shoelaces). 14프레임에서 멈춤 (사용자 확인: 게임에선 접힌 손잡이가 접힌 모양)
+    { button: document.getElementById('shelter-toggle'), clips: ['Open', 'Close'], labels: ['shelter.fold', 'shelter.unfold'], prefix: 'Wmn_Shelter_', when: () => !shelterEject, fillVis: true, endFrame: { Wmn_Shelter_Focus: 14 } },
 ];
 const LOOP_TOGGLES = [
     { input: document.getElementById('anim-glow'), match: (name) => name.endsWith('_auto'), initial: true },
@@ -679,6 +656,16 @@ function setupAnimations(gltfs, path) {
     }
     for (const sw of SWITCHES) {
         if ((sw.prefix && !path.includes(sw.prefix)) || (sw.when && !sw.when()) || !sw.clips.every((name) => clipSets[0].has(name))) continue;
+        const endFrame = Object.entries(sw.endFrame ?? {}).find(([file]) => path.includes(file))?.[1];
+        if (endFrame !== undefined) {
+            for (const clips of clipSets) {
+                for (const name of sw.clips) {
+                    const clip = clips.get(name);
+                    clip.duration = endFrame / 60 + 1e-4; // 키 시각이 float32라 살짝 여유
+                    clip.trim(); // duration 뒤의 키를 지움
+                }
+            }
+        }
         if (sw.fillVis) {
             for (const clips of clipSets) {
                 const pair = sw.clips.map((name) => clips.get(name));
@@ -698,7 +685,7 @@ function setupAnimations(gltfs, path) {
         }));
         if (sw.rest) {
             sw.state = 0;
-            sw.button.textContent = sw.labels[0];
+            setText(sw.button, sw.labels[0]);
         } else {
             playSwitch(sw, 0, true);
         }
@@ -813,7 +800,7 @@ function playSwitch(sw, state, instant = false) {
         if (instant) action.time = action.getClip().duration;
     }
     showFirstFrame();
-    sw.button.textContent = sw.labels[state];
+    setText(sw.button, sw.labels[state]);
 }
 for (const sw of SWITCHES) sw.button.addEventListener('click', () => playSwitch(sw, 1 - sw.state));
 // 빈센트: 털 클립(Open/Close)과 머리 클립(TransformTo*, Attack)이 둘 다 Brush_1·Brush_2 본 커브를 가짐. 같이 걸어 두면 three.js가 평균을 내서
@@ -827,14 +814,14 @@ for (const button of [poseSwitch.button, attackFire.button]) {
         attackFire.button.hidden = poseSwitch.state !== 1;
         for (const action of brushSwitch.actions.flat()) action.stop();
         brushSwitch.state = 0;
-        brushSwitch.button.textContent = brushSwitch.labels[0];
+        setText(brushSwitch.button, brushSwitch.labels[0]);
     });
 }
 brushSwitch.button.addEventListener('click', () => {
     if (poseSwitch.button.hidden) return;
     for (const action of [...poseSwitch.actions.flat(), ...attackFire.actions]) action.stop();
     poseSwitch.state = 0;
-    poseSwitch.button.textContent = poseSwitch.labels[0];
+    setText(poseSwitch.button, poseSwitch.labels[0]);
     attackFire.button.hidden = true;
 });
 
@@ -1142,6 +1129,8 @@ async function loadGlb(path, twoHanded = false) {
         const clipSets = setupAnimations(gltfs, path);
         setupStringer(clipSets, path);
         setupSaber(gltfs, clipSets, path);
+        // 일시정지/재생은 재생할 애니메이션이 있는 모델만 (머뉴버는 양손 선택 때문에 animBar가 떠도 애니메이션이 없음)
+        pauseButton.hidden = !clipSets.some((clips) => [...clips.values()].some((clip) => clip.tracks.length));
         const level = path.match(HERO_LEVEL)?.[2];
         heroLevel.parentElement.hidden = level === undefined;
         if (level !== undefined) {
@@ -1151,9 +1140,10 @@ async function loadGlb(path, twoHanded = false) {
         handSelect.parentElement.hidden = !twoHanded;
         staggerToggle.parentElement.hidden = !twoHanded || gltfs.length === 1;
         ejectToggle.hidden = !canEject;
-        ejectToggle.textContent = ejected ? '회복' : '사출';
+        setText(ejectToggle, ejected ? 'shelter.recover' : 'shelter.eject');
         updateEjectToggle();
         ejectSelect.parentElement.hidden = !shelterEject;
+        relabelAnimBar(path);
         updateAnimBar();
         if (shelterEject) {
             const [handle, canopy] = { canopy: [null, 0], handle: [0, null], both: [0, 1] }[shelterEject].map((i) => i === null ? null : gltfs[i]);
@@ -1227,10 +1217,16 @@ ejectToggle.addEventListener('click', () => {
 const STRINGER_CHARGE_FRAMES = { Normal: 72, Short: 34, Explosion: 80, Coop: 62 };
 // Default 클립은 기준값이 바인드 자세와 다른 무기만 있음 (플루이드 V·LACT-450의 Reel 등. 트라이 스트링거는 없어서 바인드 자세가 기본)
 const STRINGER_FADE = 0.3;
+// 트라이 스트링거 계열: 차지하면 위아래 사선 잉크통(ReelT·ReelU에 붙음)이 가운데 잉크통처럼 정면으로 돈다 (사용자 확인, 게임 화면).
+//   이 계열의 Charge·ChargeWidth 데이터에는 ReelT·ReelU 회전이 없어서 게임 코드(spl::WeaponStringer)가 돌리는 것으로 보임 (AS·액터 파라미터에는 없음).
+//   LACT-450은 Charge 데이터 기준값에 이 회전이 있음: ReelT X −20° → −1.6°, ReelU X 160° → 178.4° (+18.4°, ChargeWidth +16.9°).
+//   그래서 차지 클립에 ReelT·ReelU 회전이 없는 무기만, 두 본을 로컬 X로 STRINGER_REEL_DEG만큼 돌린 자세를 차지 상태에 같이 섞음.
+//   바인드가 ReelT −20°, ReelU 160°라서 +20°면 정확히 정면 (사용자가 준 값). 베어표는 본 구성(ReelT_1~4)이 달라서 안 함
+const STRINGER_REEL_DEG = 20;
 const stringerState = document.getElementById('stringer-state');
 const stringerFire = document.getElementById('stringer-fire-button');
 animControls.push(stringerState, stringerFire);
-const stringer = { actions: null, shoot: [], current: 'Default', shooting: false, chargeFrames: 72 };
+const stringer = { actions: null, shoot: [], reel: [], current: 'Default', shooting: false, chargeFrames: 72 };
 function setupStringer(clipSets, path) {
     stringer.actions = null;
     if (!path.includes('Wmn_Stringer_') || !clipSets[0].has('Shoot')) return;
@@ -1241,10 +1237,19 @@ function setupStringer(clipSets, path) {
         return loop ? action : once(action);
     }));
     const light = actionsFor(['Charge_Light'], true);
+    const reel = clipSets.flatMap((clips, i) => {
+        if (['Charge', 'ChargeWidth'].some((n) => clips.get(n)?.tracks.some((t) => /^Reel[TU]\./.test(t.name)))) return [];
+        const tracks = ['ReelT', 'ReelU'].map((name) => mixers[i].getRoot().getObjectByName(name)).filter(Boolean).map((bone) => {
+            const q = bone.quaternion.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), THREE.MathUtils.degToRad(STRINGER_REEL_DEG)));
+            return new THREE.QuaternionKeyframeTrack(`${bone.uuid}.quaternion`, [0], q.toArray());
+        });
+        return tracks.length === 2 ? [once(mixers[i].clipAction(new THREE.AnimationClip('Stringer_ReelFront', 1 / 60, tracks)))] : [];
+    });
+    stringer.reel = reel;
     stringer.actions = {
         Default: actionsFor(['Default']),
-        ChargeWidth: [...actionsFor(['ChargeWidth']), ...light],
-        Charge: [...actionsFor(['Charge']), ...light],
+        ChargeWidth: [...actionsFor(['ChargeWidth']), ...light, ...reel],
+        Charge: [...actionsFor(['Charge']), ...light, ...reel],
     };
     stringer.shoot = actionsFor(['Shoot', 'Shoot_Light']);
     // Shoot이 끝나면 기본 상태로 (Shoot 끝 자세 = Default 자세라 끊김 없음)
@@ -1280,6 +1285,7 @@ function setStringerState(state, instant = false) {
 }
 stringerState.addEventListener('change', (e) => setStringerState(e.target.value));
 // 발사: 어느 상태든 Shoot을 처음부터 재생하고, 끝나면 기본 상태로 (사용자 요청)
+// 잉크통 회전(stringer.reel)도 발사하면 바로 원래 각도로 (사용자 요청)
 stringerFire.addEventListener('click', () => {
     for (const action of Object.values(stringer.actions).flat()) action.stop();
     for (const action of stringer.shoot) action.reset().play();
@@ -1924,7 +1930,7 @@ let animPaused = false;
 const pauseButton = document.getElementById('anim-pause');
 pauseButton.addEventListener('click', () => {
     animPaused = !animPaused;
-    pauseButton.textContent = animPaused ? '▶ 재생' : '⏸ 일시정지';
+    setCatText(pauseButton, animPaused ? 'play' : 'pause');
 });
 
 // 저장 (PNG·GIF·WebP, 화면은 export.js): 지금 셰이더·투영 그대로, 캔버스 크기로, 배경은 투명하게, 회전 기즈모는 빼고 그림
@@ -1973,13 +1979,13 @@ function startRecording() {
     const { width, height } = renderer.domElement;
     recording = { fps, step: 1 / fps, acc: 1 / fps, frames: [], bytes: 0, total: Math.max(1, Math.round(recLength.valueAsNumber * fps) || 1), width, height, smooth: !pixelMode };
     recButton.classList.add('recording');
-    recButton.textContent = '■ 중지';
+    setText(recButton, 'export.stop');
 }
 function stopRecording() {
     const rec = recording;
     recording = null;
     recButton.classList.remove('recording');
-    recButton.textContent = '● 움짤 녹화';
+    setText(recButton, 'export.rec');
     renderFrame();
     if (rec.frames.length) openSequenceEditor({ ...rec, name: safeName(exportName) });
 }
@@ -1989,11 +1995,11 @@ function captureFrame() {
     const frame = cropFrame(image);
     recording.frames.push(frame);
     recording.bytes += frame.image?.data.length ?? 0;
-    recButton.textContent = `■ 중지 (${recording.frames.length}/${recording.total})`;
+    recButton.textContent = t('export.stopCount', { n: recording.frames.length, total: recording.total });
     if (recording.frames.length >= recording.total) stopRecording();
     else if (recording.bytes > REC_MAX_BYTES) {
         stopRecording();
-        alert('메모리가 많이 들어서 녹화를 여기서 멈췄어. 길이를 줄이거나 창을 작게 해서 다시 녹화해 줘.');
+        alert(t('export.memory'));
     }
 }
 recButton.addEventListener('click', () => (recording ? stopRecording() : startRecording()));
@@ -2033,18 +2039,20 @@ function animate(timestamp) {
 }
 animate();
 
-// 우측 패널 묶음(셰이더·저장·조명·회전)을 우하단 잉크 색 패널 바로 위에 둠. 패널 높이가 바뀌어도 위로만 늘어나서 잉크 색 패널과 안 겹치고,
-// 화면 위쪽 여백(20px)을 넘지 않게 max-height를 걸어 둠 (넘치면 셰이더 패널만 줄어듦). 카테고리 바는 잉크 색 패널 폭(--ink-w)만큼 비켜 감
+// 우측 패널 묶음(셰이더·저장·조명·회전)을 하단 바(카테고리 바) 바로 위에 둠. 패널 높이가 바뀌어도 위로만 늘어나서 하단 바와 안 겹치고,
+// 화면 위쪽 여백(20px)을 넘지 않게 max-height를 걸어 둠 (넘치면 셰이더 패널만 줄어듦)
 const rightStack = document.getElementById('right-stack');
-const colorPickerPanel = document.getElementById('color-picker-container');
+const bottomBar = document.getElementById('bottom-bar');
+const topRight = document.getElementById('top-right'); // 우측 최상단 언어 선택·저작권·문의. 우측 패널 묶음은 그 아래까지만
 function placeRightStack() {
     const ui = rightStack.offsetParent.getBoundingClientRect();
-    const ink = colorPickerPanel.getBoundingClientRect();
-    rightStack.style.bottom = `${ui.bottom - ink.top + 10}px`;
-    rightStack.style.maxHeight = `${Math.max(0, ink.top - 10 - ui.top - 20)}px`;
-    document.documentElement.style.setProperty('--ink-w', `${ink.width}px`);
+    const bar = bottomBar.getBoundingClientRect();
+    rightStack.style.bottom = `${ui.bottom - bar.top + 10}px`;
+    rightStack.style.maxHeight = `${Math.max(0, bar.top - 10 - topRight.getBoundingClientRect().bottom - 10)}px`;
 }
-new ResizeObserver(placeRightStack).observe(colorPickerPanel);
+// 하단 바의 위치는 같은 세로 흐름의 다른 칸(무기 목록·언어 선택) 크기에 따라서도 밀릴 수 있어서 함께 지켜봄
+const stackObserver = new ResizeObserver(placeRightStack);
+for (const el of [bottomBar, document.getElementById('side-panel'), document.getElementById('left-bottom'), topRight]) stackObserver.observe(el);
 window.addEventListener('resize', placeRightStack);
 placeRightStack();
 
@@ -2059,236 +2067,236 @@ window.addEventListener('resize', () => {
 
 
 const weaponData = [
-    { id: 'Shooter', name: '슈터', img: 'wpntypes/IconTypeWpn_00.png',
+    { id: 'Shooter', img: 'IconTypeWpn_00.png',
         items: [  
-                {name: '프로모델러 MG', file: 'Blaze'},
-                {name: '프로모델러 RG', file: 'Blaze_Cstm01'},
-                {name: '컬러 프로모델러', file: 'Blaze_Cstm02'},
-                {name: '프라임 슈터', file: 'Expert'},
-                {name: '프라임 슈터 컬래버', file: 'Expert_Cstm01'},
-                {name: '프라임 슈터 FRZN', file: 'Expert_Cstm02'},
-                {name: '새싹 슈터', file: 'First'},
-                {name: '단풍 슈터', file: 'First_Cstm01'},
-                {name: '보틀 가이저', file: 'Flash'},
-                {name: '포일 보틀 가이저', file: 'Flash_Cstm01'},
-                {name: '.52 갤런', file: 'Gravity'},
-                {name: '.52 갤런 데코', file: 'Gravity_Cstm01'},
-                {name: '.96 갤런', file: 'Heavy'},
-                {name: '.96 갤런 데코', file: 'Heavy_Cstm01'},
-                {name: '클로 .96 갤런', file: 'Heavy_Cstm02'},
-                {name: '제트 스위퍼', file: 'Long'},
-                {name: '커스텀 제트 스위퍼', file: 'Long_Cstm01'},
-                {name: '제트 스위퍼 COBR', file: 'Long_Cstm02'},
-                {name: '히어로 슈터', file: 'Msn0Lv0'}, // Lv1·Lv2는 animBar의 레벨 슬라이더로
+                {file: 'Blaze', img: 'Path_Wst_Shooter_Blaze_00.png'},
+                {file: 'Blaze_Cstm01', img: 'Path_Wst_Shooter_Blaze_01.png'},
+                {file: 'Blaze_Cstm02', img: 'Path_Wst_Shooter_Blaze_02.png'},
+                {file: 'Expert', img: 'Path_Wst_Shooter_Expert_00.png'},
+                {file: 'Expert_Cstm01', img: 'Path_Wst_Shooter_Expert_01.png'},
+                {file: 'Expert_Cstm02', img: 'Path_Wst_Shooter_Expert_02.png'},
+                {file: 'First', img: 'Path_Wst_Shooter_First_00.png'},
+                {file: 'First_Cstm01', img: 'Path_Wst_Shooter_First_01.png'},
+                {file: 'Flash', img: 'Path_Wst_Shooter_Flash_00.png'},
+                {file: 'Flash_Cstm01', img: 'Path_Wst_Shooter_Flash_01.png'},
+                {file: 'Gravity', img: 'Path_Wst_Shooter_Gravity_00.png'},
+                {file: 'Gravity_Cstm01', img: 'Path_Wst_Shooter_Gravity_01.png'},
+                {file: 'Heavy', img: 'Path_Wst_Shooter_Heavy_00.png'},
+                {file: 'Heavy_Cstm01', img: 'Path_Wst_Shooter_Heavy_01.png'},
+                {file: 'Heavy_Cstm02', img: 'Path_Wst_Shooter_Heavy_02.png'},
+                {file: 'Long', img: 'Path_Wst_Shooter_Long_00.png'},
+                {file: 'Long_Cstm01', img: 'Path_Wst_Shooter_Long_01.png'},
+                {file: 'Long_Cstm02', img: 'Path_Wst_Shooter_Long_02.png'},
+                {file: 'Msn0Lv0', img: 'Path_Wst_Shooter_Normal_H.png'}, // Lv1·Lv2는 animBar의 레벨 슬라이더로
                 //name: '스플랫 슈터(Splatoon1)', file: 'Normal'},
                 //name: '스플랫 슈터 컬래버(Splatoon1)', file: 'Normal_Cstm'},
                 //name: '스플랫 슈터(Splatoon2)', file: 'NormalB'},
                 //name: '스플랫 슈터 컬래버(Splatoon1)', file: 'Normal_Cstm'},
-                {name: '스플랫 슈터', file: 'NormalT'},
-                {name: '스플랫 슈터 컬래버', file: 'NormalT_Cstm01'},
-                {name: '글램 스플랫 슈터', file: 'NormalT_Cstm02'},
-                {name: 'PET 슈터 레플리카', file: 'Normal_SprlA'},
-                {name: '옥타 슈터 레플리카', file: 'RvSdodr'},
-                {name: '오더 슈터 레플리카', file: 'NormalSdodr'},
-                {name: '스페이스 슈터', file: 'QuickLong'},
-                {name: '스페이스 슈터 컬래버', file: 'QuickLong_Cstm01'},
-                {name: 'N-ZAP85', file: 'QuickMiddle'},
-                {name: 'N-ZAP89', file: 'QuickMiddle_Cstm01'},
-                {name: '볼드 마커', file: 'Short'},
-                {name: '볼드 마커 네오', file: 'Short_Cstm01'},
-                {name: '샤프 마커', file: 'Precision'},
-                {name: '샤프 마커 네오', file: 'Short_Cstm11'},
-                {name: '샤프 마커 GECK', file: 'Short_Cstm12'},
-                {name: 'L3 릴 건', file: 'TripleQuick'},
-                {name: 'L3 릴 건 D', file: 'TripleQuick_Cstm01'},
-                {name: '글리터 L3 릴 건', file: 'TripleQuick_Cstm02'},
-                {name: 'H3 릴 건', file: 'TripleMiddle'},
-                {name: 'H3 릴 건 D', file: 'TripleMiddle_Cstm01'},
-                {name: 'H3 릴 건 SNAK', file: 'TripleMiddle_Cstm02'},
+                {file: 'NormalT', img: 'Path_Wst_Shooter_Normal_00.png'},
+                {file: 'NormalT_Cstm01', img: 'Path_Wst_Shooter_Normal_01.png'},
+                {file: 'NormalT_Cstm02', img: 'Path_Wst_Shooter_Normal_02.png'},
+                {file: 'Normal_SprlA', img: 'Path_Wst_Shooter_Normal_S.png'},
+                {file: 'RvSdodr', img: 'Path_Wst_Shooter_Normal_Oct.png'},
+                {file: 'NormalSdodr', img: 'Path_Wst_Shooter_Normal_O.png'},
+                {file: 'QuickLong', img: 'Path_Wst_Shooter_QuickLong_00.png'},
+                {file: 'QuickLong_Cstm01', img: 'Path_Wst_Shooter_QuickLong_01.png'},
+                {file: 'QuickMiddle', img: 'Path_Wst_Shooter_QuickMiddle_00.png'},
+                {file: 'QuickMiddle_Cstm01', img: 'Path_Wst_Shooter_QuickMiddle_01.png'},
+                {file: 'Short', img: 'Path_Wst_Shooter_Short_00.png'},
+                {file: 'Short_Cstm01', img: 'Path_Wst_Shooter_Short_01.png'},
+                {file: 'Precision', img: 'Path_Wst_Shooter_Precision_00.png'},
+                {file: 'Short_Cstm11', img: 'Path_Wst_Shooter_Precision_01.png'},
+                {file: 'Short_Cstm12', img: 'Path_Wst_Shooter_Precision_02.png'},
+                {file: 'TripleQuick', img: 'Path_Wst_Shooter_TripleQuick_00.png'},
+                {file: 'TripleQuick_Cstm01', img: 'Path_Wst_Shooter_TripleQuick_01.png'},
+                {file: 'TripleQuick_Cstm02', img: 'Path_Wst_Shooter_TripleQuick_02.png'},
+                {file: 'TripleMiddle', img: 'Path_Wst_Shooter_TripleMiddle_00.png'},
+                {file: 'TripleMiddle_Cstm01', img: 'Path_Wst_Shooter_TripleMiddle_01.png'},
+                {file: 'TripleMiddle_Cstm02', img: 'Path_Wst_Shooter_TripleMiddle_02.png'},
                 //{name: '스플랫 슈터(적,Lv0)', file: 'RvLv0'},
                 //{name: '스플랫 슈터(적,Lv1)', file: 'RvLv1'},
                 //{name: '스플랫 슈터(적,사이드오더)', file: 'RvSdodr'},
         ]
      },
-    { id: 'Blaster', name: '블래스터', img: 'wpntypes/IconTypeWpn_01.png',
+    { id: 'Blaster', img: 'IconTypeWpn_01.png',
         items: [
-            {name: '노바 블래스터', file: 'Short'},
-            {name: '네오 노바 블래스터', file: 'Short_Cstm01'},
-            {name: '오더 블래스터 레플리카', file: 'NormalSdodr'},
-            {name: '핫 블래스터', file: 'Middle'},
-            {name: '커스텀 핫 블래스터', file: 'Middle_Cstm01'},
-            {name: '글림 핫 블래스터', file: 'Middle_Cstm02'},
-            {name: '크래시 블래스터', file: 'LightShort'},
-            {name: '네오 크래시 블래스터', file: 'LightShort_Cstm01'},
-            {name: '래피드 블래스터', file: 'Light'},
-            {name: '래피드 블래스터 데코', file: 'Light_Cstm01'},
-            {name: '롱 블래스터', file: 'Long'},
-            {name: '커스텀 롱 블래스터', file: 'Long_Cstm01'},
-            {name: 'R 블래스터 엘리트', file: 'LightLong'},
-            {name: 'R 블래스터 엘리트 데코', file: 'LightLong_Cstm11'},
-            {name: 'R 블래스터 엘리트 WNTR', file: 'LightLong_Cstm12'},
-            {name: 'S-BLAST92', file: 'Precision'},
-            {name: 'S-BLAST91', file: 'Precision_Cstm01'},
-            {name: 'Mr. 베어표 블래스터', file: 'Coop'},
+            {file: 'Short', img: 'Path_Wst_Blaster_Short_00.png'},
+            {file: 'Short_Cstm01', img: 'Path_Wst_Blaster_Short_01.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Blaster_Short_O.png'},
+            {file: 'Middle', img: 'Path_Wst_Blaster_Middle_00.png'},
+            {file: 'Middle_Cstm01', img: 'Path_Wst_Blaster_Middle_01.png'},
+            {file: 'Middle_Cstm02', img: 'Path_Wst_Blaster_Middle_02.png'},
+            {file: 'LightShort', img: 'Path_Wst_Blaster_LightShort_00.png'},
+            {file: 'LightShort_Cstm01', img: 'Path_Wst_Blaster_LightShort_01.png'},
+            {file: 'Light', img: 'Path_Wst_Blaster_Light_00.png'},
+            {file: 'Light_Cstm01', img: 'Path_Wst_Blaster_Light_01.png'},
+            {file: 'Long', img: 'Path_Wst_Blaster_Long_00.png'},
+            {file: 'Long_Cstm01', img: 'Path_Wst_Blaster_Long_01.png'},
+            {file: 'LightLong', img: 'Path_Wst_Blaster_LightLong_00.png'},
+            {file: 'LightLong_Cstm11', img: 'Path_Wst_Blaster_LightLong_01.png'},
+            {file: 'LightLong_Cstm12', img: 'Path_Wst_Blaster_LightLong_02.png'},
+            {file: 'Precision', img: 'Path_Wst_Blaster_Precision_00.png'},
+            {file: 'Precision_Cstm01', img: 'Path_Wst_Blaster_Precision_01.png'},
+            {file: 'Coop', img: 'Path_Wst_Blaster_Bear.png'},
         ]
      },
-    { id: 'Maneuver', name: '머뉴버', img: 'wpntypes/IconTypeWpn_02.png',   // 머누버 아닌가요? 응 아니야
+    { id: 'Maneuver', img: 'IconTypeWpn_02.png',   // 머누버 아닌가요? 응 아니야
         items: [
-            {name: '스플랫 머뉴버', file: 'NormalT'},
-            {name: '스플랫 머뉴버 컬래버', file: 'NormalT_Cstm01'},
-            {name: '트윙클 스플랫 머뉴버', file: 'NormalT_Cstm02'},
-            {name: '오더 머뉴버 레플리카', file: 'NormalSdodr'},
-            {name: '스퍼터리', file: 'Short'},
-            {name: '스퍼터리 휴', file: 'Short_Cstm01'},
-            {name: '스퍼터리 OWL', file: 'Short_Cstm02'},
-            {name: '블랙 쿼드 호퍼', file: 'Stepper'},
-            {name: '화이트 쿼드 호퍼', file: 'Stepper_Cstm01'},
-            {name: '소방 FF', file: 'Long'},
-            {name: '커스텀 소방 FF', file: 'Long_Cstm01'},
-            {name: '듀얼 스위퍼', file: 'Dual'},
-            {name: '커스텀 듀얼 스위퍼', file: 'Dual_Cstm01'},
-            {name: '후프 듀얼 스위퍼', file: 'Dual_Cstm02'},
-            {name: '켈빈 525', file: 'Gallon'},
-            {name: '켈빈 525 데코', file: 'Gallon_Cstm01'},
-            {name: 'Mr. 베어표 머뉴버', file: 'Coop'},
+            {file: 'NormalT', img: 'Path_Wst_Maneuver_Normal_00.png'},
+            {file: 'NormalT_Cstm01', img: 'Path_Wst_Maneuver_Normal_01.png'},
+            {file: 'NormalT_Cstm02', img: 'Path_Wst_Maneuver_Normal_02.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Maneuver_Normal_O.png'},
+            {file: 'Short', img: 'Path_Wst_Maneuver_Short_00.png'},
+            {file: 'Short_Cstm01', img: 'Path_Wst_Maneuver_Short_01.png'},
+            {file: 'Short_Cstm02', img: 'Path_Wst_Maneuver_Short_02.png'},
+            {file: 'Stepper', img: 'Path_Wst_Maneuver_Stepper_00.png'},
+            {file: 'Stepper_Cstm01', img: 'Path_Wst_Maneuver_Stepper_01.png'},
+            {file: 'Long', img: 'Path_Wst_Maneuver_Long_00.png'},
+            {file: 'Long_Cstm01', img: 'Path_Wst_Maneuver_Long_01.png'},
+            {file: 'Dual', img: 'Path_Wst_Maneuver_Dual_00.png'},
+            {file: 'Dual_Cstm01', img: 'Path_Wst_Maneuver_Dual_01.png'},
+            {file: 'Dual_Cstm02', img: 'Path_Wst_Maneuver_Dual_02.png'},
+            {file: 'Gallon', img: 'Path_Wst_Maneuver_Gallon_00.png'},
+            {file: 'Gallon_Cstm01', img: 'Path_Wst_Maneuver_Gallon_01.png'},
+            {file: 'Coop', img: 'Path_Wst_Maneuver_Bear.png'},
         ]
     },
-    { id: 'Spinner', name: '스피너', img: 'wpntypes/IconTypeWpn_03.png',
+    { id: 'Spinner', img: 'IconTypeWpn_03.png',
         items: [
-            {name: '배럴 스피너', file: 'StandardT'},
-            {name: '배럴 스피너 데코', file: 'StandardT_Cstm01'},
-            {name: '오더 스피너 레플리카', file: 'NormalSdodr'},
-            {name: '쿠겔 슈라이버', file: 'Downpour'},
-            {name: '쿠겔 슈라이버 휴', file: 'Downpour_Cstm01'},
-            {name: '이그재미너', file: 'HyperShort'},
-            {name: '이그재미너 휴', file: 'HyperShort_Cstm01'},
-            {name: '하이드런트', file: 'HyperT'},
-            {name: '커스텀 하이드런트', file: 'HyperT_Cstm01'},
-            {name: '토렌트 하이드런트', file: 'HyperT_Cstm02'},
-            {name: '스플랫 스피너', file: 'QuickT'},
-            {name: '스플랫 스피너 컬래버', file: 'QuickT_Cstm01'},
-            {name: '스플랫 스피너 PYTN', file: 'QuickT_Cstm02'},
-            {name: '노틸러스 47', file: 'Serein'},
-            {name: '노틸러스 49', file: 'Serein_Cstm01'},
+            {file: 'StandardT', img: 'Path_Wst_Spinner_Standard_00.png'},
+            {file: 'StandardT_Cstm01', img: 'Path_Wst_Spinner_Standard_01.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Spinner_Standard_O.png'},
+            {file: 'Downpour', img: 'Path_Wst_Spinner_Downpour_00.png'},
+            {file: 'Downpour_Cstm01', img: 'Path_Wst_Spinner_Downpour_01.png'},
+            {file: 'HyperShort', img: 'Path_Wst_Spinner_HyperShort_00.png'},
+            {file: 'HyperShort_Cstm01', img: 'Path_Wst_Spinner_HyperShort_01.png'},
+            {file: 'HyperT', img: 'Path_Wst_Spinner_Hyper_00.png'},
+            {file: 'HyperT_Cstm01', img: 'Path_Wst_Spinner_Hyper_01.png'},
+            {file: 'HyperT_Cstm02', img: 'Path_Wst_Spinner_Hyper_02.png'},
+            {file: 'QuickT', img: 'Path_Wst_Spinner_Quick_00.png'},
+            {file: 'QuickT_Cstm01', img: 'Path_Wst_Spinner_Quick_01.png'},
+            {file: 'QuickT_Cstm02', img: 'Path_Wst_Spinner_Quick_02.png'},
+            {file: 'Serein', img: 'Path_Wst_Spinner_Serein_00.png'},
+            {file: 'Serein_Cstm01', img: 'Path_Wst_Spinner_Serein_01.png'},
         ]
      },
-    { id: 'Charger', name: '차저', img: 'wpntypes/IconTypeWpn_04.png',
+    { id: 'Charger', img: 'IconTypeWpn_04.png',
         items: [
-            {name: '소이 튜버', file: 'Keeper'},
-            {name: '커스텀 소이 튜버', file: 'Keeper_Cstm01'},
-            {name: '14식 대나무 총 갑', file: 'Light'},
-            {name: '14식 대나무 총 을', file: 'Light_Cstm01'},
-            {name: '리터 4K', file: 'Long'},
-            {name: '커스텀 리터 4K', file: 'Long_Cstm01'},
-            {name: '4K 스코프', file: 'LongScope'},
-            {name: '커스텀 4K 스코프', file: 'LongScope_Cstm01'},
+            {file: 'Keeper', img: 'Path_Wst_Charger_Keeper_00.png'},
+            {file: 'Keeper_Cstm01', img: 'Path_Wst_Charger_Keeper_01.png'},
+            {file: 'Light', img: 'Path_Wst_Charger_Light_00.png'},
+            {file: 'Light_Cstm01', img: 'Path_Wst_Charger_Light_01.png'},
+            {file: 'Long', img: 'Path_Wst_Charger_Long_00.png'},
+            {file: 'Long_Cstm01', img: 'Path_Wst_Charger_Long_01.png'},
+            {file: 'LongScope', img: 'Path_Wst_Charger_LongScope_00.png'},
+            {file: 'LongScope_Cstm01', img: 'Path_Wst_Charger_LongScope_01.png'},
             // {name: '리터 4K(Splatoon 2)', file: 'LongB'}, 
-            {name: '오더 차저 레플리카', file: 'NormalSdodr'},
-            {name: '스플랫 차저', file: 'NormalT'},
-            {name: '스플랫 차저 컬래버', file: 'NormalT_Cstm01'},
-            {name: '스플랫 차저 FRST', file: 'NormalT_Cstm02'},
-            {name: '스플랫 스코프', file: 'NormalTScope'},
-            {name: '스플랫 스코프 컬래버', file: 'NormalTScope_Cstm01'},
-            {name: '스플랫 스코프 FRST', file: 'NormalTScope_Cstm02'},
-            {name: 'R-PEN/5H', file: 'Pencil'},
-            {name: 'R-PEN/5B', file: 'Pencil_Cstm01'},
-            {name: '스퀵 클린 α', file: 'Quick'},
-            {name: '스퀵 클린 β', file: 'Quick_Cstm01'},
-            {name: 'Mr. 베어표 차저', file: 'Coop'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Charger_Normal_O.png'},
+            {file: 'NormalT', img: 'Path_Wst_Charger_Normal_00.png'},
+            {file: 'NormalT_Cstm01', img: 'Path_Wst_Charger_Normal_01.png'},
+            {file: 'NormalT_Cstm02', img: 'Path_Wst_Charger_Normal_02.png'},
+            {file: 'NormalTScope', img: 'Path_Wst_Charger_NormalScope_00.png'},
+            {file: 'NormalTScope_Cstm01', img: 'Path_Wst_Charger_NormalScope_01.png'},
+            {file: 'NormalTScope_Cstm02', img: 'Path_Wst_Charger_NormalScope_02.png'},
+            {file: 'Pencil', img: 'Path_Wst_Charger_Pencil_00.png'},
+            {file: 'Pencil_Cstm01', img: 'Path_Wst_Charger_Pencil_01.png'},
+            {file: 'Quick', img: 'Path_Wst_Charger_Quick_00.png'},
+            {file: 'Quick_Cstm01', img: 'Path_Wst_Charger_Quick_01.png'},
+            {file: 'Coop', img: 'Path_Wst_Charger_Bear.png'},
         ]
      },
-    { id: 'Roller', name: '롤러', img: 'wpntypes/IconTypeWpn_05.png',
+    { id: 'Roller', img: 'IconTypeWpn_05.png',
         items: [
             // {name: '호쿠사이?', file: 'BrushNormal'},    // 호쿠사이가 Roller 태그를 갖고있음. 이유는 알수없음. Wmn_Brush_Normal과 무슨차이인지도 알 수 없음.
             // {name: '호쿠사이 휴?', file: 'BrushNormal_Cstm'},    // 제외사유 동일
-            {name: '스플랫 롤러', file: 'NormalT'},
-            {name: '스플랫 롤러 컬래버', file: 'NormalT_Cstm01'},
-            {name: '오더 롤러 레플리카', file: 'NormalSdodr'},
-            {name: '카본 롤러', file: 'Compact'},
-            {name: '카본 롤러 데코', file: 'Compact_Cstm01'},
-            {name: '카본 롤러 ANGL', file: 'Compact_Cstm02'},
-            {name: '다이나모 롤러', file: 'Heavy'},             // 다이너모 아닌가요? 응 아니야
-            {name: '골드 다이나모 롤러', file: 'Heavy_Cstm01'},
-            {name: '스타 다이나모 롤러', file: 'Heavy_Cstm02'},
-            {name: '베리어블 롤러', file: 'Hunter'},
-            {name: '포일 베리어블 롤러', file: 'Hunter_Cstm01'},
-            {name: '와이드 롤러', file: 'Wide'},
-            {name: '와이드 롤러 컬래버', file: 'Wide_Cstm01'},
-            {name: '플래닛 와이드 롤러', file: 'Wide_Cstm02'},
-            {name: 'Mr. 베어표 롤러', file: 'Coop'},
+            {file: 'NormalT', img: 'Path_Wst_Roller_Normal_00.png'},
+            {file: 'NormalT_Cstm01', img: 'Path_Wst_Roller_Normal_01.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Roller_Normal_O.png'},
+            {file: 'Compact', img: 'Path_Wst_Roller_Compact_00.png'},
+            {file: 'Compact_Cstm01', img: 'Path_Wst_Roller_Compact_01.png'},
+            {file: 'Compact_Cstm02', img: 'Path_Wst_Roller_Compact_02.png'},
+            {file: 'Heavy', img: 'Path_Wst_Roller_Heavy_00.png'},             // 다이너모 아닌가요? 응 아니야
+            {file: 'Heavy_Cstm01', img: 'Path_Wst_Roller_Heavy_01.png'},
+            {file: 'Heavy_Cstm02', img: 'Path_Wst_Roller_Heavy_02.png'},
+            {file: 'Hunter', img: 'Path_Wst_Roller_Hunter_00.png'},
+            {file: 'Hunter_Cstm01', img: 'Path_Wst_Roller_Hunter_01.png'},
+            {file: 'Wide', img: 'Path_Wst_Roller_Wide_00.png'},
+            {file: 'Wide_Cstm01', img: 'Path_Wst_Roller_Wide_01.png'},
+            {file: 'Wide_Cstm02', img: 'Path_Wst_Roller_Wide_02.png'},
+            {file: 'Coop', img: 'Path_Wst_Roller_Bear.png'},
         ]
      },
-    { id: 'Brush', name: '붓', img: 'wpntypes/IconTypeWpn_06.png',
+    { id: 'Brush', img: 'IconTypeWpn_06.png',
         items: [
-            {name: '호쿠사이', file: 'Normal'},
-            {name: '호쿠사이 휴', file: 'Normal_Cstm01'},
-            {name: '코메트 호쿠사이', file: 'Normal_Cstm02'},
-            {name: '오더 브러시 레플리카', file: 'NormalSdodr'},
-            {name: '파블로', file: 'Mini'},
-            {name: '파블로 휴', file: 'Mini_Cstm01'},
-            {name: '빈센트', file: 'Heavy'},
-            {name: '빈센트 휴', file: 'Heavy_Cstm01'},
-            {name: '빈센트 BRNZ', file: 'Heavy_Cstm02'},
+            {file: 'Normal', img: 'Path_Wst_Brush_Normal_00.png'},
+            {file: 'Normal_Cstm01', img: 'Path_Wst_Brush_Normal_01.png'},
+            {file: 'Normal_Cstm02', img: 'Path_Wst_Brush_Normal_02.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Brush_Normal_O.png'},
+            {file: 'Mini', img: 'Path_Wst_Brush_Mini_00.png'},
+            {file: 'Mini_Cstm01', img: 'Path_Wst_Brush_Mini_01.png'},
+            {file: 'Heavy', img: 'Path_Wst_Brush_Heavy_00.png'},
+            {file: 'Heavy_Cstm01', img: 'Path_Wst_Brush_Heavy_01.png'},
+            {file: 'Heavy_Cstm02', img: 'Path_Wst_Brush_Heavy_02.png'},
         ] },
-    { id: 'Slosher', name: '슬로셔', img: 'wpntypes/IconTypeWpn_07.png',
+    { id: 'Slosher', img: 'IconTypeWpn_07.png',
         items: [
-            {name: '버킷 슬로셔', file: 'StrongT'},
-            {name: '버킷 슬로셔 데코', file: 'StrongT_Cstm01'},
-            {name: '오더 슬로셔 레플리카', file: 'NormalSdodr'},
-            {name: '물통', file: 'Diffusion'},
-            {name: '물통 휴', file: 'Diffusion_Cstm01'},
-            {name: '물통 ASH', file: 'Diffusion_Cstm02'},
-            {name: '몹 링', file: 'Double'},
-            {name: '몹 링 D', file: 'Double_Cstm01'},
-            {name: '혼 몹 링', file: 'Double_Cstm02'},
-            {name: '스크루 슬로셔', file: 'Launcher'},
-            {name: '네오 스크루 슬로셔', file: 'Launcher_Cstm01'},
-            {name: '오버플로셔', file: 'Bathtub'},
-            {name: '오버플로셔 데코', file: 'Bathtub_Cstm01'},
-            {name: '익스플로셔', file: 'Washtub'},
-            {name: '커스텀 익스플로셔', file: 'Washtub_Cstm01'},
-            {name: 'Mr. 베어표 슬로셔', file: 'Coop'},
+            {file: 'StrongT', img: 'Path_Wst_Slosher_Strong_00.png'},
+            {file: 'StrongT_Cstm01', img: 'Path_Wst_Slosher_Strong_01.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Slosher_Strong_O.png'},
+            {file: 'Diffusion', img: 'Path_Wst_Slosher_Diffusion_00.png'},
+            {file: 'Diffusion_Cstm01', img: 'Path_Wst_Slosher_Diffusion_01.png'},
+            {file: 'Diffusion_Cstm02', img: 'Path_Wst_Slosher_Diffusion_02.png'},
+            {file: 'Double', img: 'Path_Wst_Slosher_Double_00.png'},
+            {file: 'Double_Cstm01', img: 'Path_Wst_Slosher_Double_01.png'},
+            {file: 'Double_Cstm02', img: 'Path_Wst_Slosher_Double_02.png'},
+            {file: 'Launcher', img: 'Path_Wst_Slosher_Launcher_00.png'},
+            {file: 'Launcher_Cstm01', img: 'Path_Wst_Slosher_Launcher_01.png'},
+            {file: 'Bathtub', img: 'Path_Wst_Slosher_Bathtub_00.png'},
+            {file: 'Bathtub_Cstm01', img: 'Path_Wst_Slosher_Bathtub_01.png'},
+            {file: 'Washtub', img: 'Path_Wst_Slosher_Washtub_00.png'},
+            {file: 'Washtub_Cstm01', img: 'Path_Wst_Slosher_Washtub_01.png'},
+            {file: 'Coop', img: 'Path_Wst_Slosher_Bear.png'},
         ] },
-    { id: 'Shelter', name: '셸터', img: 'wpntypes/IconTypeWpn_08.png',
+    { id: 'Shelter', img: 'IconTypeWpn_08.png',
         items: [
-            {name: '파라 셸터', file: 'Normal'},
-            {name: '파라 셸터 소렐라', file: 'Normal_Cstm01'},
-            {name: '오더 셸터 레플리카', file: 'NormalSdodr'},
-            {name: '스파이 가젯', file: 'Compact'},
-            {name: '스파이 가젯 소렐라', file: 'Compact_Cstm01'},
-            {name: '패턴 스파이 가젯', file: 'Compact_Cstm02'},
-            {name: '캠핑 셸터', file: 'Wide'},
-            {name: '캠핑 셸터 소렐라', file: 'Wide_Cstm01'},
-            {name: '캠핑 셸터 CREM', file: 'Wide_Cstm02'},
-            {name: '24식 도돌이 우산 갑', file: 'Focus'},
-            {name: '24식 도돌이 우산 을', file: 'Focus_Cstm01'},
-            {name: 'Mr. 베어표 셸터', file: 'Coop'},
+            {file: 'Normal', img: 'Path_Wst_Shelter_Normal_00.png'},
+            {file: 'Normal_Cstm01', img: 'Path_Wst_Shelter_Normal_01.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Shelter_Normal_O.png'},
+            {file: 'Compact', img: 'Path_Wst_Shelter_Compact_00.png'},
+            {file: 'Compact_Cstm01', img: 'Path_Wst_Shelter_Compact_01.png'},
+            {file: 'Compact_Cstm02', img: 'Path_Wst_Shelter_Compact_02.png'},
+            {file: 'Wide', img: 'Path_Wst_Shelter_Wide_00.png'},
+            {file: 'Wide_Cstm01', img: 'Path_Wst_Shelter_Wide_01.png'},
+            {file: 'Wide_Cstm02', img: 'Path_Wst_Shelter_Wide_02.png'},
+            {file: 'Focus', img: 'Path_Wst_Shelter_Focus_00.png'},
+            {file: 'Focus_Cstm01', img: 'Path_Wst_Shelter_Focus_01.png'},
+            {file: 'Coop', img: 'Path_Wst_Shelter_Bear.png'},
         ] },
-    { id: 'Stringer', name: '스트링거', img: 'wpntypes/IconTypeWpn_09.png',
+    { id: 'Stringer', img: 'IconTypeWpn_09.png',
         items: [
-            {name: '트라이 스트링거', file: 'Normal'},
-            {name: '트라이 스트링거 컬래버', file: 'Normal_Cstm01'},
-            {name: '벌브 트라이 스트링거', file: 'Normal_Cstm02'},
-            {name: '오더 스트링거 레플리카', file: 'NormalSdodr'},
-            {name: 'LACT-450', file: 'Short'},
-            {name: 'LACT-450 데코', file: 'Short_Cstm01'},
-            {name: 'LACT-450 MILK', file: 'Short_Cstm02'},
-            {name: '플루이드 V', file: 'Explosion'},
-            {name: '커스텀 플루이드 V', file: 'Explosion_Cstm01'},
-            {name: 'Mr. 베어표 스트링거', file: 'Coop'},
+            {file: 'Normal', img: 'Path_Wst_Stringer_Normal_00.png'},
+            {file: 'Normal_Cstm01', img: 'Path_Wst_Stringer_Normal_01.png'},
+            {file: 'Normal_Cstm02', img: 'Path_Wst_Stringer_Normal_02.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Stringer_Normal_O.png'},
+            {file: 'Short', img: 'Path_Wst_Stringer_Short_00.png'},
+            {file: 'Short_Cstm01', img: 'Path_Wst_Stringer_Short_01.png'},
+            {file: 'Short_Cstm02', img: 'Path_Wst_Stringer_Short_02.png'},
+            {file: 'Explosion', img: 'Path_Wst_Stringer_Explosion_00.png'},
+            {file: 'Explosion_Cstm01', img: 'Path_Wst_Stringer_Explosion_01.png'},
+            {file: 'Coop', img: 'Path_Wst_Stringer_Bear.png'},
         ] },
-    { id: 'Saber', name: '와이퍼', img: 'wpntypes/IconTypeWpn_10.png',
+    { id: 'Saber', img: 'IconTypeWpn_10.png',
         items: [
-            {name: '사무 와이퍼', file: 'Normal'},
-            {name: '사무 와이퍼 휴', file: 'Normal_Cstm01'},
-            {name: '스티커 사무 와이퍼', file: 'Normal_Cstm02'},
-            {name: '오더 와이퍼 레플리카', file: 'NormalSdodr'},
-            {name: '드라이브 와이퍼', file: 'Light'},
-            {name: '드라이브 와이퍼 데코', file: 'Light_Cstm01'},
-            {name: '드라이브 와이퍼 RUST', file: 'Light_Cstm02'},
-            {name: '민트 덴탈 와이퍼', file: 'Heavy'}, // 케이스는 따로 된 Case 모델 대신 본 모델의 Case 부품을 켜고 끔 (사용자 요청, setupSaber)
-            {name: '잉크 덴탈 와이퍼', file: 'Heavy_Cstm01'},
-            {name: 'Mr. 베어표 와이퍼', file: 'Coop'},
+            {file: 'Normal', img: 'Path_Wst_Saber_Normal_00.png'},
+            {file: 'Normal_Cstm01', img: 'Path_Wst_Saber_Normal_01.png'},
+            {file: 'Normal_Cstm02', img: 'Path_Wst_Saber_Normal_02.png'},
+            {file: 'NormalSdodr', img: 'Path_Wst_Saber_Normal_O.png'},
+            {file: 'Light', img: 'Path_Wst_Saber_Lite_00.png'},
+            {file: 'Light_Cstm01', img: 'Path_Wst_Saber_Lite_01.png'},
+            {file: 'Light_Cstm02', img: 'Path_Wst_Saber_Lite_02.png'},
+            {file: 'Heavy', img: 'Path_Wst_Saber_Heavy_00.png'}, // 케이스는 따로 된 Case 모델 대신 본 모델의 Case 부품을 켜고 끔 (사용자 요청, setupSaber)
+            {file: 'Heavy_Cstm01', img: 'Path_Wst_Saber_Heavy_01.png'},
+            {file: 'Coop', img: 'Path_Wst_Saber_Bear.png'},
         ] }
 ];
 
@@ -2296,23 +2304,35 @@ const listTitle = document.getElementById('list-title');
 const modelList = document.getElementById('model-list');
 const categoryBar = document.getElementById('category-bar');
 
+// 무기 이미지: img/weapon_flat/의 item.img. 아직 못 찾은 무기는 'Dummy.png' (weaponData에서 img를 바꾸면 됨)
+let currentCat = null;
 weaponData.forEach(cat => {
     const btn = document.createElement('div');
     btn.className = 'cat-btn';
-    btn.style.backgroundImage = `url(${cat.img})`;
+    btn.style.backgroundImage = `url(img/wpntypes/${cat.img})`;
     
     btn.onclick = () => {
+        currentCat = btn;
         for (const other of categoryBar.children) other.classList.toggle('active', other === btn);
         // console.log(`${cat.name} 카테고리 선택됨`);
         
-        listTitle.textContent = cat.name;
+        listTitle.removeAttribute('data-i18n'); // 처음 글자('무기')만 i18n 키, 이후는 무기군 이름
+        listTitle.textContent = categoryName(cat.id);
         modelList.innerHTML = '';
         cat.items.forEach(item => {
             const li = document.createElement('li');
-            li.textContent = item.name;
+            const img = document.createElement('img');
+            img.src = `img/weapon_flat/${item.img}`;
+            img.alt = '';
+            img.loading = 'lazy';
+            img.draggable = false; // 이미지를 끌면 드래그 스크롤 대신 이미지 끌기가 됨
+            const label = document.createElement('span');
+            label.textContent = weaponName(`${cat.id}_${item.file}`);
+            li.append(img, label);
+            li.dataset.file = item.file;
             const name = `Wmn_${cat.id}_${item.file}`;
             li.onclick = () => {
-                exportName = item.name;
+                exportName = englishWeaponName(`${cat.id}_${item.file}`) ?? name; // 저장 파일 이름은 언어와 상관없이 영어 무기 이름 (없으면 모델 파일 이름)
                 loadGlb(`glb/${name}.glb`, cat.id === 'Maneuver');
             };
             modelList.appendChild(li);
@@ -2320,7 +2340,33 @@ weaponData.forEach(cat => {
     };
     categoryBar.appendChild(btn);
 });
+// 무기 목록 마우스 드래그 스크롤 (터치는 브라우저 기본 스와이프). 몇 px 이상 끌었으면 놓을 때의 클릭은 무기 선택으로 치지 않음
+const LIST_DRAG_PX = 5;
+let listDrag = null;
+modelList.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'mouse' || e.button !== 0) return;
+    listDrag = { y: e.clientY, scroll: modelList.scrollTop, moved: false };
+});
+window.addEventListener('pointermove', (e) => {
+    if (!listDrag) return;
+    const dy = e.clientY - listDrag.y;
+    if (!listDrag.moved && Math.abs(dy) < LIST_DRAG_PX) return;
+    listDrag.moved = true;
+    modelList.scrollTop = listDrag.scroll - dy;
+});
+window.addEventListener('pointerup', () => {
+    if (!listDrag?.moved) { listDrag = null; return; }
+    setTimeout(() => { listDrag = null; }); // 바로 뒤따르는 click을 아래에서 막은 다음 풀어 줌
+});
+modelList.addEventListener('click', (e) => { if (listDrag?.moved) e.stopPropagation(); }, true);
+onLangChange(() => {
+    // 목록을 다시 그려도 스크롤 위치는 유지
+    const scroll = modelList.scrollTop;
+    currentCat?.onclick();
+    modelList.scrollTop = scroll;
+});
+mountLangPicker(document.getElementById('lang-picker'));
 
 // 첫 화면: 슈터 목록을 펼치고 스플랫 슈터를 불러옴
 categoryBar.firstChild.click();
-[...modelList.children].find((li) => li.textContent === '스플랫 슈터').click();
+[...modelList.children].find((li) => li.dataset.file === 'NormalT').click();

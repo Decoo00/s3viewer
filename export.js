@@ -5,6 +5,8 @@
 // - WebP: 브라우저 인코더(canvas.toBlob)로 프레임마다 WebP를 만든 뒤 애니메이션 WebP(RIFF ANMF)로 묶음. 반투명 가장자리 유지
 //   Safari 등 WebP 인코딩이 안 되는 브라우저는 저장 불가 안내
 
+import { t, setText } from './i18n.js';
+
 export const editor = { open: false }; // 편집기가 열려 있는 동안 main.js는 3D 화면을 그리지 않음
 
 // 알파가 0이 아닌 영역만 잘라 냄 (리틀 엔디언에서 Uint32의 최상위 바이트 = 알파)
@@ -54,7 +56,7 @@ export async function savePng(imageData, crop, name) {
     const canvas = document.createElement('canvas');
     if (crop) {
         const { image } = cropFrame(imageData);
-        if (!image) return alert('화면에 저장할 모델이 없어.');
+        if (!image) return alert(t('export.noModel'));
         imageData = image;
     }
     canvas.width = imageData.width;
@@ -242,7 +244,7 @@ function showFrame(i) {
     ui.strip.querySelector('.current')?.classList.remove('current');
     thumb?.classList.add('current');
     thumb?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    ui.skip.textContent = state.skipped.has(i) ? '이 프레임 넣기' : '이 프레임 빼기';
+    setText(ui.skip, state.skipped.has(i) ? 'ed.unskip' : 'ed.skip');
 }
 function refreshStrip() {
     for (const [k, thumb] of [...ui.strip.children].entries()) {
@@ -254,12 +256,12 @@ function refreshInfo() {
     const seq = sequence();
     const [w, h] = outputSize();
     const fps = Number(ui.fps.value);
-    ui.info.textContent = `${seq.length}프레임 · ${(seq.length / fps).toFixed(2)}초 · ${w}×${h}`;
+    ui.info.textContent = t('ed.info', { n: seq.length, sec: (seq.length / fps).toFixed(2), w, h });
     ui.save.disabled = !seq.length;
 }
 function setPlaying(playing) {
     state.playing = playing;
-    ui.play.textContent = playing ? '⏸ 정지' : '▶ 재생';
+    setText(ui.play, playing ? 'ed.stop' : 'ed.play');
     clearInterval(playTimer);
     if (!playing) return;
     const seq = sequence();
@@ -369,7 +371,7 @@ ui.save.addEventListener('click', async () => {
     setPlaying(false);
     const controls = ui.root.querySelectorAll('button, select, input');
     for (const el of controls) el.disabled = true;
-    const progress = (n) => { ui.info.textContent = `저장 중 ${n} / ${seq.length}`; };
+    const progress = (n) => { ui.info.textContent = t('ed.saving', { n, total: seq.length }); };
     try {
         const blob = format === 'gif'
             ? await encodeGif(seq.length, (k) => imageOf(drawFrame(seq[k])), fps, loop, progress)
@@ -377,7 +379,7 @@ ui.save.addEventListener('click', async () => {
         saveBlob(blob, `${state.name}.${format}`);
     } catch (e) {
         console.error(e);
-        alert(e.message === 'webp' ? '이 브라우저는 WebP 저장을 지원하지 않아. GIF로 저장하거나 Chrome·Edge·Firefox를 써 줘.' : `저장 실패: ${e.message}`);
+        alert(e.message === 'webp' ? `This browser doesn't support WebP. Save in GIF or use Chrome·Edge·Firefox.` : `Failed to save: ${e.message}`);
     } finally {
         for (const el of controls) el.disabled = false;
         if (state) {
