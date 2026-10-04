@@ -7,6 +7,8 @@
     <style>
         body { margin: 0; overflow: hidden; }
         canvas { width: 100%; height: 100%; }
+        /* 렌더러는 투명 배경을 그릴 수 있게 alpha: true. 평소엔 배경이 불투명이라 안 보이고, 움짤 녹화 중(투명 배경으로 그림)에만 체크무늬가 보임 */
+        body > canvas, #ed-preview { background: repeating-conic-gradient(#8a8a8a 0 25%, #b0b0b0 0 50%) 0 0 / 20px 20px; }
         #info { position: absolute; top: 10px; width: 100%; text-align: center; color: white; }
         #version { font-size: 12px; opacity: 0.7; }
         /* 화면 위에 겹치는 UI 레이어: 위쪽은 무기 목록, 아래쪽은 하단 바. 서로 영역을 나눠 가져서 겹치지 않음 */
@@ -31,7 +33,7 @@
             gap: 10px;
             pointer-events: none;
         }
-        #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel, #anim-bar { pointer-events: auto; }
+        #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel, #shader-panel, #anim-bar, #export-panel { pointer-events: auto; }
         #category-wrap { position: relative; max-width: 100%; } /* 카테고리 바·animBar의 max-width 기준 (화면 폭) */
         #anim-bar { /* 임시: 모델 애니메이션 조작. 카테고리 바 바로 위에 띄워서 레이아웃 높이에 넣지 않음 (나타나고 사라져도 좌측 패널·잉크 색 위치가 그대로) */
             position: absolute;
@@ -56,11 +58,31 @@
         }
         #anim-bar > * { flex-shrink: 0; }
         #anim-bar[hidden], #anim-bar [hidden] { display: none; }
-        #light-panel label { display: block; }
-        #light-panel { /* 임시 위치: 우측, 회전 패널 위 */
+        /* 우측 패널 묶음: [셰이더] 옆에 [조명 위, 회전 아래] 세로 묶음. 서로 겹치지 않고, 아래쪽을 잉크 색 패널 바로 위에 맞춤 (bottom은 main.js에서 계산)
+           셰이더 패널을 옆에 둬서 픽셀 옵션이 펼쳐져도 위로 넘치지 않음 */
+        #right-stack {
             position: absolute;
             right: 20px;
-            top: 30%;
+            bottom: 150px;
+            display: flex;
+            align-items: flex-end;
+            gap: 10px;
+            pointer-events: none;
+        }
+        #right-col {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 10px;
+        }
+        #shader-panel label, #light-panel label { display: block; }
+        #shader-panel [hidden] { display: none; }
+        #export-panel { display: flex; flex-direction: column; gap: 6px; }
+        #export-panel [hidden] { display: none; }
+        #export-panel .row { display: flex; align-items: center; gap: 6px; }
+        #rec-length { width: 52px; }
+        #rec-start.recording { background: #c0392b; color: white; }
+        #shader-panel, #light-panel, #export-panel {
             background: rgba(0, 0, 0, 0.7);
             color: white;
             padding: 10px 12px;
@@ -69,10 +91,7 @@
             font-size: 14px;
         }
         #rotation-panel {
-            position: absolute; /* #ui 기준 우측 중앙 */
-            right: 20px;
-            top: 50%;
-            transform: translateY(-50%);
+            position: relative; /* 숨기기 버튼 기준 */
             display: flex;
             flex-direction: column;
             gap: 6px;
@@ -148,12 +167,15 @@
             border-radius: 10px;
             color: white;
             display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 5px;
+            align-items: flex-start;
+            gap: 12px;
             font-family: sans-serif;
         }
-        #team-color-input {
+        /* 잉크 색·배경 색을 옆으로 나란히 (세로로 쌓으면 위쪽 우측 패널이 화면 밖으로 밀림) */
+        #color-picker-container .color-item { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+        #color-picker-container [hidden] { display: none; }
+        #hdri-bg-label { font-size: 12px; }
+        #team-color-input, #bg-color-input {
             width: 50px;
             height: 50px;
             border: none;
@@ -201,6 +223,48 @@
         }
         .cat-btn.active:hover { transform: scale(1.1) translateY(-5px); }
 
+        /* 움짤 시퀀스 편집기 */
+        #export-editor {
+            position: fixed;
+            inset: 0;
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.6);
+            font-family: sans-serif;
+            font-size: 14px;
+            color: white;
+        }
+        #export-editor[hidden] { display: none; }
+        #export-editor .ed-box {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: min(960px, calc(100vw - 32px));
+            max-height: calc(100vh - 32px);
+            box-sizing: border-box;
+            padding: 16px;
+            background: #222;
+            border-radius: 10px;
+        }
+        #export-editor .ed-view { display: flex; justify-content: center; min-height: 0; }
+        #ed-preview { width: auto; height: auto; max-width: 100%; max-height: 55vh; object-fit: contain; image-rendering: pixelated; }
+        #ed-strip { display: flex; gap: 3px; overflow-x: auto; padding-bottom: 4px; flex-shrink: 0; }
+        #ed-strip canvas {
+            width: auto;
+            height: 48px;
+            flex-shrink: 0;
+            cursor: pointer;
+            background: #555;
+            border: 2px solid transparent;
+        }
+        #ed-strip canvas.current { border-color: #f0fd01; }
+        #ed-strip canvas.out { opacity: 0.25; }
+        #ed-strip canvas.skipped { opacity: 0.25; outline: 2px solid #e74c3c; outline-offset: -2px; }
+        #export-editor .ed-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+        #ed-info { opacity: 0.8; }
+
         #controls-help {
             position: fixed;
             top: 20px;
@@ -239,7 +303,7 @@
     </style>
 </head>
 <body>
-    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.5</div></div>
+    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.6</div></div>
     <div id="ui">
         <div id="side-panel" class="collapsible left">
             <h2 id="list-title">무기</h2>
@@ -248,11 +312,36 @@
         </div>
         <div id="bottom-bar">
             <div id="color-picker-container">
+                <div class="color-item">
                 <label>잉크 색</label>
-                <input type="color" id="team-color-input" value="#fedc0c">
+                <input type="color" id="team-color-input" value="#fedc0c" list="ink-presets">
+                <datalist id="ink-presets">
+                    <option value="#1a1ab0"></option>
+                    <option value="#d0bf08"></option>
+                    <option value="#2cb822"></option>
+                    <option value="#1ec0ad"></option>
+                    <option value="#e38d24"></option>
+                    <option value="#9026c6"></option>
+                    <option value="#c12d74"></option>
+                    <option value="#aef4f0"></option>
+                </datalist>
+                </div>
+                <div class="color-item">
+                <label>배경 색</label>
+                <input type="color" id="bg-color-input" value="#a0a0a0" list="bg-presets">
+                <datalist id="bg-presets">
+                    <option value="#ffffff"></option>
+                    <option value="#d0d0d0"></option>
+                    <option value="#a0a0a0"></option>
+                    <option value="#505050"></option>
+                    <option value="#000000"></option>
+                </datalist>
+                <label id="hdri-bg-label" hidden><input type="checkbox" id="hdri-bg" checked> HDRI</label>
+                </div>
             </div>
             <div id="category-wrap">
                 <div id="anim-bar" hidden>
+                    <button id="anim-pause">⏸ 일시정지</button>
                     <button id="fold-toggle" hidden>접기</button>
                     <button id="brush-toggle" hidden>밀기</button>
                     <button id="shot-toggle" hidden>단거리 모드로</button>
@@ -274,11 +363,79 @@
                     <label hidden><input type="checkbox" id="anim-shot"> 사격</label>
                     <label hidden>차지 <input type="range" id="anim-charge" min="0" max="1" step="0.01" value="0"></label>
                     <label hidden>탄 수 <input type="range" id="anim-bullet" min="0" max="5" step="1" value="0"></label>
+                    <label hidden>레벨 <input type="range" id="hero-level" min="0" max="2" step="1" value="0"> <span id="hero-level-text">Lv0</span></label>
                     <label hidden><select id="hand-select"><option value="R">오른손</option><option value="L">왼손</option><option value="both">양손</option></select></label>
                     <label hidden><input type="checkbox" id="hand-stagger"> 사선 배치</label>
                 </div>
                 <div id="category-bar"></div>
             </div>
+        </div>
+        <div id="right-stack">
+        <div id="shader-panel">
+            <label>셰이더
+                <select id="shader-mode">
+                    <option value="game" selected>인게임</option>
+                    <option value="pixel">픽셀</option>
+                    <option value="line">선화</option>
+                    <option value="toon">카툰</option>
+                </select>
+            </label>
+            <label>투영
+                <select id="projection-mode">
+                    <option value="persp" selected>원근</option>
+                    <option value="ortho">직교</option>
+                </select>
+            </label>
+            <div id="toon-options" hidden>
+                <label>명암 단계
+                    <select id="toon-steps">
+                        <option value="2" selected>2단</option>
+                        <option value="3">3단</option>
+                    </select>
+                </label>
+                <label>경계 부드러움 <input type="range" id="toon-soft" min="0" max="0.1" step="0.005" value="0.02"></label>
+                <label><input type="checkbox" id="toon-rim" checked> 림 라이트</label>
+                <label><input type="checkbox" id="toon-outline" checked> 외곽선</label>
+                <label>선 두께 <input type="range" id="toon-width" min="1" max="4" step="1" value="2"> <span id="toon-width-text">2</span></label>
+            </div>
+            <div id="line-options" hidden>
+                <label><input type="checkbox" id="line-outline" checked> 바깥선</label>
+                <label><input type="checkbox" id="line-part" checked> 부품선</label>
+                <label><input type="checkbox" id="line-crease" checked> 접힘선</label>
+                <label>채우기
+                    <select id="line-fill">
+                        <option value="white" selected>흰색</option>
+                        <option value="none">없음</option>
+                        <option value="silhouette">실루엣</option>
+                    </select>
+                </label>
+                <label>선 두께 <input type="range" id="line-width" min="1" max="4" step="1" value="2"> <span id="line-width-text">2</span></label>
+            </div>
+            <div id="pixel-options" hidden>
+                <label>픽셀 크기 <input type="range" id="pixel-size" min="2" max="16" step="1" value="8"> <span id="pixel-size-text">8</span></label>
+                <label><input type="checkbox" id="pixel-outline" checked> 외곽선</label>
+                <label><input type="checkbox" id="pixel-cel"> 셀 셰이딩</label>
+                <label><input type="checkbox" id="pixel-snap" checked> 크립 제거 (직교)</label>
+                <label><input type="checkbox" id="pixel-quantize" checked> 팔레트</label>
+                <label>색 단계 <input type="range" id="pixel-levels" min="2" max="16" step="1" value="7"> <span id="pixel-levels-text">7</span></label>
+                <label><input type="checkbox" id="pixel-dither"> 디더링</label>
+            </div>
+        </div>
+        <div id="right-col">
+        <div id="export-panel">
+            <div class="row"><button id="save-png">PNG 저장</button> <label><input type="checkbox" id="export-crop" checked> 여백 자르기</label></div>
+            <div class="row">움짤
+                <select id="rec-fps">
+                    <option value="15">15fps</option>
+                    <option value="20">20fps</option>
+                    <option value="25">25fps</option>
+                    <option value="30" selected>30fps</option>
+                    <option value="50">50fps</option>
+                </select>
+                <input type="number" id="rec-length" min="0.1" max="60" step="0.1" value="3"> 초
+            </div>
+            <button id="rec-turn" hidden>자동 회전 한 바퀴 길이로</button>
+            <button id="rec-start">● 움짤 녹화</button>
         </div>
         <div id="light-panel">
             <label>조명
@@ -304,12 +461,15 @@
             <button id="rot-reset">무기 정면</button>
             <button id="view-reset">시점 초기화</button>
         </div>
+        </div>
+        </div>
     </div>
     <script type="importmap">
       {
         "imports": {
           "three": "https://unpkg.com/three@0.186.0/build/three.module.js",
-          "three/addons/": "https://unpkg.com/three@0.186.0/examples/jsm/"
+          "three/addons/": "https://unpkg.com/three@0.186.0/examples/jsm/",
+          "gifenc": "https://unpkg.com/gifenc@1.0.3/dist/gifenc.esm.js"
         }
       }
     </script>
@@ -328,6 +488,34 @@
             <li><strong>확대/축소:</strong> 두 손가락 벌리기/모으기</li>
             <li><strong>잉크 색상 변경:</strong> 우하단 컬러 피커 활용</li>
         </ul>
+    </div>
+    <div id="export-editor" hidden>
+        <div class="ed-box">
+            <div class="ed-view"><canvas id="ed-preview" width="1" height="1"></canvas></div>
+            <div id="ed-strip"></div>
+            <div class="ed-row">
+                <button id="ed-play">⏸ 정지</button>
+                <span id="ed-frame"></span>
+                <button id="ed-set-start">여기부터</button>
+                <button id="ed-set-end">여기까지</button>
+                <button id="ed-skip">이 프레임 빼기</button>
+                <button id="ed-reset">편집 초기화</button>
+            </div>
+            <div class="ed-row">
+                <label>재생 <select id="ed-dir"><option value="fwd">정방향</option><option value="rev">역방향</option><option value="ping">왕복</option></select></label>
+                <label>속도 <select id="ed-fps"><option value="10">10fps</option><option value="15">15fps</option><option value="20">20fps</option><option value="25">25fps</option><option value="30">30fps</option><option value="50">50fps</option></select></label>
+                <label>반복 <select id="ed-loop"><option value="0">무한</option><option value="1">1번</option></select></label>
+                <label>크기 <select id="ed-scale"><option value="100">100%</option><option value="75">75%</option><option value="50">50%</option><option value="25">25%</option></select></label>
+                <label><input type="checkbox" id="ed-crop" checked> 여백 자르기</label>
+            </div>
+            <div class="ed-row">
+                <label>형식 <select id="ed-format"><option value="gif">GIF</option><option value="webp">WebP</option></select></label>
+                <button id="ed-save">저장</button>
+                <button id="ed-png">이 프레임 PNG</button>
+                <button id="ed-close">닫기</button>
+                <span id="ed-info"></span>
+            </div>
+        </div>
     </div>
     <script type="module" src="main.js"></script>
 </body>

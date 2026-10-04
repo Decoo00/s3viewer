@@ -4,6 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+import { editor, cropFrame, savePng, safeName, openSequenceEditor } from './export.js';
 
 /**
  * TODO
@@ -22,7 +23,7 @@ scene.background = BACKGROUND_COLOR;
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 200);
 camera.position.set(-1, 1, 3);
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); // alpha: 저장할 때 배경을 투명하게 (평소엔 배경이 불투명이라 차이 없음)
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 renderer.shadowMap.enabled = true;
@@ -68,6 +69,10 @@ lightRig.add(gameLight);
 const ENV_ATLAS_BLOCKS = [[0, 0, 256], [0, 256, 64], ...Array.from({ length: 10 }, (_, i) => [384 + i % 6 * 192, 256 + Math.floor(i / 6) * 32, 32])];
 const gameEnv = {
     s3EnvOn: { value: 0 },
+    s3Cel: { value: 0 }, // 셀 셰이딩 명암 단계 수 (0 = 끔). 픽셀 셰이더 옵션
+    s3Toon: { value: new THREE.Vector4() }, // 카툰 셰이더: (켬, 명암 단계, 경계 부드러움, 림 라이트)
+    s3ToonKey: { value: new THREE.Color() }, // 카툰 명암 기준 주광 (색 × 세기)
+
     s3EnvAtlas: { value: null },
     s3EnvBlocks: { value: ENV_ATLAS_BLOCKS.map((b) => new THREE.Vector3(...b)) },
     s3EnvRot: { value: new THREE.Matrix3() }, // 조명 방향 슬라이더
@@ -128,6 +133,9 @@ function loadGameEnvAtlas() {
 }
 // 큐브 번호 = roundEven(5.5 − 5.5·cos(π·거칠기)) (first.a.frag:354). 면 방향은 D3D 큐브맵 규칙 (덤프 SH를 큐브 0번에서 다시 계산해서 확인)
 const GAME_ENV_GLSL = `uniform float s3EnvOn;
+uniform float s3Cel;
+uniform vec4 s3Toon;
+uniform vec3 s3ToonKey;
 vec3 s3AmbNormal; // SH 확산을 읽는 법선 (transfilm은 정점 법선 쪽으로 섞음). 머티리얼이 안 정하면 normal
 bool s3AmbNormalSet = false;
 uniform sampler2D s3EnvAtlas;
@@ -173,6 +181,51 @@ if (s3EnvOn > 0.5) {
     vec3 s3Env = s3EnvRadiance(s3EnvRot * transformDirectionByInverseViewMatrix(reflect(-geometryViewDir, normal), viewMatrix), s3R);
     reflectedLight.indirectSpecular += s3Env * (material.specularColorBlended * s3Brdf.x + s3Brdf.y);
     reflectedLight.indirectDiffuse += s3ShIrradiance(s3EnvRot * transformDirectionByInverseViewMatrix(s3AmbNormalSet ? s3AmbNormal : normal, viewMatrix)) * material.diffuseContribution * (1.0 - material.specularColorBlended);
+}
+// 카툰 (카툰 셰이더, 게임 근거 없는 보기용. 끄면 게임 식 그대로). 길티기어 Xrd·젤다 야숨식 셀 셰이딩을 참고
+// - 명암: 직접광 확산(N·L × 그림자 맵)을 가장 밝은 주광 대비 비율로 바꾸고 AO를 곱한 값을 임계값으로 2단(또는 3단)으로 끊음. 경계만 s3Toon.z만큼 부드럽게
+// - 그림자 색: 검게 누르지 않고 채도를 올린 알베도 × 환경광 (길티기어의 그림자 색 텍스처 흉내)
+// - 밝은 면: 알베도 × (환경광 + 주광 × 0.75) 단색
+// - 하이라이트: 직접 반사가 일정 이상인 곳만 단색. 환경 반사(금속)는 3단으로 끊음
+// - 림 라이트(야숨): 밝은 면의 가장자리에 얇은 밝은 띠
+if (s3Toon.x > 0.5) {
+    const vec3 s3Lum = vec3(0.299, 0.587, 0.114);
+    vec3 s3Albedo = material.diffuseContribution;
+    float s3Key = max(dot(s3ToonKey, s3Lum), 1e-4);
+    float s3Ratio = dot(reflectedLight.directDiffuse, s3Lum) / max(dot(s3Albedo, s3Lum) * RECIPROCAL_PI * s3Key, 1e-4);
+    #ifdef USE_AOMAP
+    s3Ratio *= (texture2D(aoMap, vAoMapUv).r - 1.0) * aoMapIntensity + 1.0;
+    #endif
+    float s3Soft = max(s3Toon.z, 1e-3);
+    float s3Lit = s3Toon.y > 2.5
+        ? 0.5 * smoothstep(0.08 - s3Soft, 0.08 + s3Soft, s3Ratio) + 0.5 * smoothstep(0.5 - s3Soft, 0.5 + s3Soft, s3Ratio)
+        : smoothstep(0.2 - s3Soft, 0.2 + s3Soft, s3Ratio);
+    vec3 s3Amb = reflectedLight.indirectDiffuse / max(s3Albedo, vec3(1e-4)); // 환경광 조도
+    float s3Max = max(max(s3Albedo.r, s3Albedo.g), max(s3Albedo.b, 1e-4));
+    vec3 s3ShadowAlbedo = s3Albedo * mix(vec3(1.0), s3Albedo / s3Max, 0.6);
+    vec3 s3LitColor = s3Albedo * (s3Amb + s3ToonKey * RECIPROCAL_PI * 0.75);
+    vec3 s3ShadowColor = s3ShadowAlbedo * (s3Amb + s3ToonKey * RECIPROCAL_PI * 0.12);
+    reflectedLight.directDiffuse = mix(s3ShadowColor, s3LitColor, s3Lit);
+    reflectedLight.indirectDiffuse = vec3(0.0);
+    float s3Spec = dot(reflectedLight.directSpecular, s3Lum) / s3Key;
+    reflectedLight.directSpecular = smoothstep(0.06 - s3Soft * 0.5, 0.06 + s3Soft * 0.5, s3Spec) * s3Lit * (0.35 + 0.65 * material.specularColorBlended) * s3ToonKey * RECIPROCAL_PI * 0.6;
+    float s3Env = dot(reflectedLight.indirectSpecular, s3Lum);
+    reflectedLight.indirectSpecular *= s3Env > 1e-4 ? floor(s3Env * 3.0 + 0.5) / 3.0 / s3Env : 0.0;
+    float s3Rim = smoothstep(0.75 - s3Soft, 0.75 + s3Soft, 1.0 - saturate(dot(normal, geometryViewDir)));
+    reflectedLight.directDiffuse += s3Toon.w * s3Rim * s3Lit * s3Albedo * s3ToonKey * RECIPROCAL_PI * 0.5;
+}
+// 셀 셰이딩 (픽셀 셰이더 옵션, 게임 근거 없는 보기용. 끄면(0) 게임 식 그대로)
+// - 확산: 직접광 + 환경광을 합친 밝기(확산색 대비)를 1/s3Cel 단위로 끊어서 면이 단색 띠로 나오게
+// - 직접 반사: 밝기 0.3을 넘는 곳만 같은 밝기(1)의 단색 하이라이트로
+if (s3Cel > 0.5) {
+    const vec3 s3Lum = vec3(0.299, 0.587, 0.114);
+    float s3Base = max(dot(material.diffuseContribution, s3Lum), 1e-4);
+    float s3Light = dot(reflectedLight.directDiffuse + reflectedLight.indirectDiffuse, s3Lum) / s3Base;
+    float s3Scale = s3Light > 1e-4 ? floor(s3Light * s3Cel + 0.5) / s3Cel / s3Light : 0.0;
+    reflectedLight.directDiffuse *= s3Scale;
+    reflectedLight.indirectDiffuse *= s3Scale;
+    float s3Spec = dot(reflectedLight.directSpecular, s3Lum);
+    reflectedLight.directSpecular = s3Spec > 0.3 ? reflectedLight.directSpecular / s3Spec : vec3(0.0);
 }`)
         // 게임은 환경광(SH + 큐브)에 AO를 그대로 곱함. three.js는 환경맵이 있을 때만 반사에 AO를 (다른 식으로) 곱해서 여기서 곱함
         .replace('#include <aomap_fragment>', '#include <aomap_fragment>\n#ifdef USE_AOMAP\nif (s3EnvOn > 0.5) reflectedLight.indirectSpecular *= ambientOcclusion;\n#endif');
@@ -225,6 +278,9 @@ floor.position.y = -1.3;
 floor.receiveShadow = true;
 
 scene.add(floor);
+// 바닥은 숨겨둠 (사용자 요청). 다시 쓰려면 true
+const FLOOR_ENABLED = false;
+floor.visible = FLOOR_ENABLED;
 
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
 pmremGenerator.compileEquirectangularShader();
@@ -252,6 +308,23 @@ function loadHdri(path) {
     }
     return hdriCache.get(path);
 }
+// 배경 색: 잉크 색 아래 색 선택 (프리셋 흰색·밝은 회색·회색·어두운 회색·검은색 + 직접 고르기). 기본은 원래 배경색 #a0a0a0
+// HDRI 조명 프리셋은 HDRI 하늘이 배경. 'HDRI 배경'을 끄거나 배경 색을 고르면 조명은 HDRI 그대로 두고 배경만 색으로
+const bgColorInput = document.getElementById('bg-color-input');
+const hdriBgToggle = document.getElementById('hdri-bg');
+const hdriBgLabel = document.getElementById('hdri-bg-label');
+let currentHdri = null;
+function applyBackground() {
+    scene.background = currentHdri && hdriBgToggle.checked ? currentHdri : BACKGROUND_COLOR;
+    scene.backgroundBlurriness = scene.background === currentHdri ? HDRI_BLUR : 0;
+    hdriBgLabel.hidden = !currentHdri;
+}
+bgColorInput.addEventListener('input', () => {
+    BACKGROUND_COLOR.set(bgColorInput.value);
+    hdriBgToggle.checked = false;
+    applyBackground();
+});
+hdriBgToggle.addEventListener('change', applyBackground);
 let presetSeq = 0;
 async function applyLightPreset(name) {
     const seq = ++presetSeq;
@@ -260,12 +333,12 @@ async function applyLightPreset(name) {
     if (preset.inGame) await loadGameEnvAtlas();
     if (seq !== presetSeq) return; // 받는 동안 다른 프리셋이 선택됨
     scene.environment = hdri ?? preset.environment ?? null;
-    scene.background = hdri ?? BACKGROUND_COLOR;
-    scene.backgroundBlurriness = hdri ? HDRI_BLUR : 0;
+    currentHdri = hdri;
+    applyBackground();
     // HDRI는 1보다 밝은 값(해, 하늘)이 있어서 tone mapping으로 눌러야 자연스러움
     renderer.toneMapping = hdri ? THREE.ACESFilmicToneMapping : preset.inGame ? THREE.CustomToneMapping : THREE.NoToneMapping;
     renderer.toneMappingExposure = preset.inGame ? GAME_EXPOSURE : 1;
-    floor.visible = !hdri; // 회색 바닥은 HDRI 배경과 안 어울림
+    floor.visible = FLOOR_ENABLED && !hdri; // 회색 바닥은 HDRI 배경과 안 어울림
     for (const light of directLights) light.visible = !hdri && preset.directLights;
     gameLight.visible = !!preset.inGame;
     gameEnv.s3EnvOn.value = preset.inGame ? 1 : 0;
@@ -371,7 +444,7 @@ function nearestRing(pointer) {
         if (!handle.visible) continue;
         const pos = handle.geometry.attributes.position;
         for (let i = 0; i < pos.count; i++) {
-            ringVertex.fromBufferAttribute(pos, i).applyMatrix4(handle.matrixWorld).project(camera);
+            ringVertex.fromBufferAttribute(pos, i).applyMatrix4(handle.matrixWorld).project(activeCamera);
             const d = Math.hypot((ringVertex.x + 1) / 2 * w - px, (1 - ringVertex.y) / 2 * h - py);
             if (d < bestDist) { bestDist = d; best = handle.name; }
         }
@@ -402,7 +475,7 @@ const ringHit = new THREE.Vector3();
 const ringCross = new THREE.Vector3();
 const ringQuat = new THREE.Quaternion();
 function ringPlanePoint(pointer) {
-    ringRaycaster.setFromCamera(pointer, camera);
+    ringRaycaster.setFromCamera(pointer, activeCamera);
     return ringRaycaster.ray.intersectPlane(ringDrag.plane, ringHit);
 }
 const originalPointerDown = gizmo.pointerDown.bind(gizmo);
@@ -412,7 +485,7 @@ gizmo.pointerDown = (pointer) => {
     if (!gizmo.dragging || !(gizmo.axis in AXIS_VECTORS)) return;
     ringDrag.axis = AXIS_VECTORS[gizmo.axis];
     modelPivot.getWorldPosition(ringDrag.center);
-    const toCamera = ringCross.subVectors(camera.position, ringDrag.center).normalize();
+    const toCamera = ringCross.subVectors(activeCamera.position, ringDrag.center).normalize();
     if (Math.abs(ringDrag.axis.dot(toCamera)) < EDGE_ON_COS) return;
     ringDrag.plane.setFromNormalAndCoplanarPoint(ringDrag.axis, ringDrag.center);
     if (!ringPlanePoint(pointer)) return;
@@ -1013,6 +1086,15 @@ const ejectToggle = document.getElementById('shelter-eject-toggle');
 const ejectSelect = document.getElementById('shelter-eject');
 animControls.push(ejectToggle, ejectSelect.parentElement);
 let ejected = false; // 사출 버튼 상태. 모델을 바꿔도 유지
+// 히어로 슈터 레벨: 목록에는 하나만 두고 Msn0Lv0~2 파일을 슬라이더로 바꿔 불러옴
+const HERO_LEVEL = /(Wmn_Shooter_Msn0Lv)(\d)/;
+const heroLevel = document.getElementById('hero-level');
+const heroLevelText = document.getElementById('hero-level-text');
+animControls.push(heroLevel.parentElement);
+heroLevel.addEventListener('input', () => {
+    heroLevelText.textContent = `Lv${heroLevel.value}`;
+    loadGlb(lastGlb.path.replace(HERO_LEVEL, `$1${heroLevel.value}`), lastGlb.twoHanded);
+});
 let shelterEject = null;
 // 셰이프 이름 '<본>__<머티리얼>'의 본 (Gun, Umbrella_Open, Umbrella_Close)
 function shelterPart(obj) {
@@ -1060,6 +1142,12 @@ async function loadGlb(path, twoHanded = false) {
         const clipSets = setupAnimations(gltfs, path);
         setupStringer(clipSets, path);
         setupSaber(gltfs, clipSets, path);
+        const level = path.match(HERO_LEVEL)?.[2];
+        heroLevel.parentElement.hidden = level === undefined;
+        if (level !== undefined) {
+            heroLevel.value = level;
+            heroLevelText.textContent = `Lv${level}`;
+        }
         handSelect.parentElement.hidden = !twoHanded;
         staggerToggle.parentElement.hidden = !twoHanded || gltfs.length === 1;
         ejectToggle.hidden = !canEject;
@@ -1319,24 +1407,642 @@ colorInput.addEventListener('input', (e) => {
     }
 });
 
+// 셰이더 종류: 인게임 = 위의 게임 셰이더 그대로
+// 픽셀 = 같은 셰이더로 낮은 해상도 렌더 타겟에 그린 뒤 최근접으로 화면에 늘림. 머티리얼을 안 건드려서 잉크·emission·애니메이션은 그대로
+// - 렌더 타겟은 MSAA 없이 그려서 도트 경계가 섞이지 않음. HDR 값이 남도록 HalfFloat
+// - three.js는 렌더 타겟에 그릴 때 톤맵·sRGB를 안 하므로, 화면에 옮기는 패스에서 같은 톤맵(인게임이면 CustomToneMapping)과 sRGB를 적용
+// - 외곽선: 렌더 타겟 깊이로 실루엣(뒤가 멀리 떨어진 앞쪽 픽셀)을 찾아 1도트 어둡게. 1/z는 평면에서 화면상 선형이라 2차 차분으로 평면(바닥 등)은 걸러냄
+// - 팔레트: 화면 색(sRGB)을 HSV로 바꿔 명도·채도는 단계 수로, 색상은 24단계로 끊음. RGB 채널별로 끊으면 회색이 붉게 갈라지는 등 색조가 틀어져서
+//   디더링을 켜면 4×4 Bayer 무늬로 명도 단계 사이를 섞음
+// - 회전 기즈모는 픽셀 처리 없이 화면 해상도로 마지막에 따로 그림
+// 게임 셰이더 근거가 없는 보기용 효과라 인게임 기본값에는 영향 없음 (ProPixelizer의 실루엣 외곽선·팔레트·디더를 참고)
+const shaderSelect = document.getElementById('shader-mode');
+const pixelSizeSlider = document.getElementById('pixel-size');
+const pixelSizeText = document.getElementById('pixel-size-text');
+const outlineToggle = document.getElementById('pixel-outline');
+const quantizeToggle = document.getElementById('pixel-quantize');
+const quantizeSlider = document.getElementById('pixel-levels');
+const quantizeText = document.getElementById('pixel-levels-text');
+const ditherToggle = document.getElementById('pixel-dither');
+const projectionSelect = document.getElementById('projection-mode');
+const celToggle = document.getElementById('pixel-cel');
+const CEL_STEPS = 3; // 셀 셰이딩 명암 단계 (그늘 / 중간 / 밝음 + 0)
+const snapToggle = document.getElementById('pixel-snap');
+// 깊이로 부품 경계(앞뒤로 떨어진 곳)를 찾는 GLSL. 픽셀 외곽선과 선화가 같이 씀
+const DEPTH_EDGE_GLSL = `#include <packing>
+uniform sampler2D tDepth;
+uniform vec2 size;
+uniform float cameraNear;
+uniform float cameraFar;
+uniform float ortho;
+const float OUTLINE_GAP = 0.03; // 앞뒤 거리 차이가 이 비율보다 크면 경계
+// 평면 위에서 화면 좌표에 대해 선형인 깊이 값 (클수록 가까움). 원근: 1/거리, 직교: −거리. 배경은 아주 먼 값
+float invDepth(vec2 p) {
+    float d = texture2D(tDepth, (p + 0.5) / size).x;
+    if (ortho > 0.5) return d >= 1.0 ? -1e6 : orthographicDepthToViewZ(d, cameraNear, cameraFar);
+    return d >= 1.0 ? 0.0 : -1.0 / perspectiveDepthToViewZ(d, cameraNear, cameraFar);
+}
+// 이웃 n이 c보다 충분히 멀고(거리 비율), 반대쪽 이웃 o까지 셋이 한 평면이 아니면 경계 (평면은 1/z가 선형이라 2차 차분으로 걸러냄)
+bool edge(float c, float n, float o) {
+    float scale = OUTLINE_GAP * (ortho > 0.5 ? -c : c);
+    return c - n > scale && abs(n + o - 2.0 * c) > scale;
+}
+`;
+const pixelTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+pixelTarget.depthTexture = new THREE.DepthTexture(1, 1);
+const pixelMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+        tScene: { value: pixelTarget.texture },
+        tDepth: { value: pixelTarget.depthTexture },
+        size: { value: new THREE.Vector2(1, 1) },
+        cameraNear: { value: 1 },
+        cameraFar: { value: 1 },
+        ortho: { value: 0 },
+        outline: { value: 1 },
+        levels: { value: 0 },
+        dither: { value: 0 },
+    },
+    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+    fragmentShader: `${DEPTH_EDGE_GLSL}
+uniform sampler2D tScene;
+uniform float outline;
+uniform float levels;
+uniform float dither;
+varying vec2 vUv;
+const float OUTLINE_DARK = 0.3; // 외곽선 = 원래 색 × 이 값
+// 4×4 Bayer 행렬 (0~15) / 16. 렌더 타겟 픽셀 좌표 기준이라 무늬도 도트 크기를 따름
+float bayer4(vec2 p) {
+    vec2 a = mod(p, 4.0);
+    vec2 b = mod(floor(a * 0.5), 2.0);
+    vec2 c = mod(a, 2.0);
+    // 2×2 Bayer [0 2; 3 1] = mod(2x + 3y, 4). 4×4 = 4 × (하위 비트의 2×2) + (상위 비트의 2×2)
+    return (4.0 * mod(2.0 * c.x + 3.0 * c.y, 4.0) + mod(2.0 * b.x + 3.0 * b.y, 4.0)) / 16.0;
+}
+vec3 rgb2hsv(vec3 c) {
+    vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + 1e-10)), d / (q.x + 1e-10), q.x);
+}
+vec3 hsv2rgb(vec3 c) {
+    vec3 p = abs(fract(c.xxx + vec3(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
+    return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
+}
+void main() {
+    vec2 p = floor(vUv * size);
+    gl_FragColor = texture2D(tScene, (p + 0.5) / size);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+    gl_FragColor.rgb = clamp(gl_FragColor.rgb, 0.0, 1.0);
+    if (outline > 0.5) {
+        float c = invDepth(p);
+        float l = invDepth(p - vec2(1.0, 0.0)), r = invDepth(p + vec2(1.0, 0.0));
+        float d = invDepth(p - vec2(0.0, 1.0)), u = invDepth(p + vec2(0.0, 1.0));
+        if (texture2D(tDepth, (p + 0.5) / size).x < 1.0 && (edge(c, l, r) || edge(c, r, l) || edge(c, d, u) || edge(c, u, d))) gl_FragColor.rgb *= OUTLINE_DARK;
+    }
+    if (levels > 1.0) {
+        vec3 hsv = rgb2hsv(gl_FragColor.rgb);
+        float offset = dither > 0.5 ? bayer4(p) - 0.46875 : 0.0; // 평균이 0이 되도록 (0~15/16의 평균 = 7.5/16)
+        float steps = levels - 1.0;
+        hsv.x = floor(hsv.x * 24.0 + 0.5) / 24.0;
+        hsv.y = clamp(floor(hsv.y * steps + 0.5) / steps, 0.0, 1.0);
+        hsv.z = clamp(floor(hsv.z * steps + 0.5 + offset) / steps, 0.0, 1.0);
+        gl_FragColor.rgb = hsv2rgb(hsv);
+    }
+}`,
+    depthTest: false,
+    depthWrite: false,
+});
+const pixelQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), pixelMaterial);
+pixelQuad.frustumCulled = false;
+const pixelCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+// 투영: 원근 = 기존 카메라. 직교 = 원근 카메라를 매 프레임 따라가는 직교 카메라
+// - OrbitControls는 원근 카메라를 그대로 움직이고, 직교 화면 높이를 (타깃까지 거리 × tan(fov/2))로 맞춰서 확대·이동·전환 시 보이는 크기가 같음
+// - 직교 카메라는 ORTHO_BACK만큼 뒤에서 그려서, 확대해서 원근 카메라가 모델에 가까워져도 앞이 잘리지 않음
+const ORTHO_BACK = 50;
+const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, camera.near, camera.far + ORTHO_BACK);
+const orthoBack = new THREE.Vector3();
+let activeCamera = camera;
+// 픽셀 크립 제거 (ProPixelizer처럼 직교에서만): 직교 카메라 위치를 화면 평면에서 도트 1칸 단위로 맞춤
+// → 이동(팬)해도 같은 월드 위치가 항상 같은 도트에 떨어져서 도트가 기어다니지 않음. 모델 회전·확대 중에는 남음
+const snapRight = new THREE.Vector3(), snapUp = new THREE.Vector3();
+function syncOrthoCamera(pixelW = 0, pixelH = 0) {
+    const halfH = camera.position.distanceTo(controls.target) * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+    const halfW = pixelH ? halfH * pixelW / pixelH : halfH * camera.aspect; // 픽셀 모드: 렌더 타겟 비율에 맞춰 도트를 정사각형으로
+    orthoCamera.left = -halfW;
+    orthoCamera.right = halfW;
+    orthoCamera.top = halfH;
+    orthoCamera.bottom = -halfH;
+    orthoCamera.updateProjectionMatrix();
+    orthoCamera.quaternion.copy(camera.quaternion);
+    orthoCamera.position.copy(camera.position).add(orthoBack.set(0, 0, ORTHO_BACK).applyQuaternion(camera.quaternion));
+    if (pixelH && snapToggle.checked) {
+        const cell = 2 * halfH / pixelH; // 도트 1칸의 월드 크기
+        snapRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+        snapUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+        const x = orthoCamera.position.dot(snapRight), y = orthoCamera.position.dot(snapUp);
+        orthoCamera.position.addScaledVector(snapRight, Math.round(x / cell) * cell - x).addScaledVector(snapUp, Math.round(y / cell) * cell - y);
+    }
+    orthoCamera.updateMatrixWorld();
+}
+function applyProjection() {
+    activeCamera = projectionSelect.value === 'ortho' ? orthoCamera : camera;
+    if (activeCamera === orthoCamera) syncOrthoCamera();
+    gizmo.camera = activeCamera;
+}
+projectionSelect.addEventListener('change', applyProjection);
+let pixelMode = false;
+let lineMode = false;
+let toonMode = false;
+// 셰이더를 바꾸면 투영도 기본값으로 (인게임: 원근, 픽셀: 직교). 그 뒤에 투영만 따로 바꿀 수 있음
+shaderSelect.addEventListener('change', () => {
+    if (shaderSelect.value === 'line') return; // 선화는 보던 투영 그대로
+    projectionSelect.value = shaderSelect.value === 'pixel' ? 'ortho' : 'persp';
+    applyProjection();
+});
+function applyShaderMode() {
+    pixelMode = shaderSelect.value === 'pixel';
+    lineMode = shaderSelect.value === 'line';
+    toonMode = shaderSelect.value === 'toon';
+    document.getElementById('line-options').hidden = !lineMode;
+    document.getElementById('toon-options').hidden = !toonMode;
+    gameEnv.s3Toon.value.x = toonMode ? 1 : 0;
+    gameEnv.s3Cel.value = pixelMode && celToggle.checked ? CEL_STEPS : 0;
+    snapToggle.parentElement.hidden = projectionSelect.value !== 'ortho';
+    document.getElementById('pixel-options').hidden = !pixelMode;
+    quantizeSlider.parentElement.hidden = !quantizeToggle.checked;
+    ditherToggle.parentElement.hidden = !quantizeToggle.checked;
+    pixelSizeText.textContent = pixelSizeSlider.value;
+    quantizeText.textContent = quantizeSlider.value;
+    pixelMaterial.uniforms.outline.value = outlineToggle.checked ? 1 : 0;
+    pixelMaterial.uniforms.levels.value = quantizeToggle.checked ? quantizeSlider.valueAsNumber : 0;
+    pixelMaterial.uniforms.dither.value = ditherToggle.checked ? 1 : 0;
+}
+for (const el of [shaderSelect, outlineToggle, quantizeToggle, ditherToggle, celToggle, projectionSelect]) el.addEventListener('change', applyShaderMode);
+for (const el of [pixelSizeSlider, quantizeSlider]) el.addEventListener('input', applyShaderMode);
+applyShaderMode();
+applyProjection();
+const drawSize = new THREE.Vector2();
+const gizmoHelper = gizmo.getHelper();
+// 선화: 트레이스 밑그림용. 게임 셰이더 대신 노멀만 그리는 머티리얼로 화면 해상도 렌더 타겟에 한 번 그리고(색 계산이 없어서 인게임보다 가벼움)
+// 깊이·노멀에서 선을 찾음 → 선 두께만큼 넓혀서 채우기와 합침
+// - 바깥선: 모델이 배경과 닿는 안쪽 1px
+// - 부품선: 깊이로 앞뒤가 떨어진 경계 (픽셀 외곽선과 같은 식)
+// - 접힘선: 같은 깊이 면에서 노멀이 LINE_CREASE_COS보다 크게 꺾인 곳
+// - 노멀 머티리얼에 원래 머티리얼의 alphaMap·alphaTest·side를 옮겨서 구멍(alpha test)은 그대로, 그림자 전용 머티리얼은 안 그림
+// - 텍스처에 그려진 무늬는 형상이 아니라서 선으로 안 나옴
+const LINE_CREASE_COS = Math.cos(THREE.MathUtils.degToRad(35)); // 이보다 크게 꺾이면 접힘선
+const lineOutlineToggle = document.getElementById('line-outline');
+const linePartToggle = document.getElementById('line-part');
+const lineCreaseToggle = document.getElementById('line-crease');
+const lineFillSelect = document.getElementById('line-fill');
+const lineWidthSlider = document.getElementById('line-width');
+const lineWidthText = document.getElementById('line-width-text');
+const lineTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+lineTarget.depthTexture = new THREE.DepthTexture(1, 1);
+const edgeTarget = new THREE.WebGLRenderTarget(1, 1, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+const lineNormalMaterials = new WeakMap();
+function lineNormalMaterial(material) {
+    let m = lineNormalMaterials.get(material);
+    if (!m) {
+        m = new THREE.MeshNormalMaterial({ side: material.side });
+        // MeshNormalMaterial 셰이더에는 alpha 맵·alpha test가 없어서 끼워 넣음 (uniform은 three.js가 공통으로 채움)
+        m.alphaMap = material.alphaMap;
+        m.alphaTest = material.alphaTest;
+        m.colorWrite = material.colorWrite;
+        m.depthWrite = material.depthWrite;
+        m.onBeforeCompile = (shader) => {
+            shader.fragmentShader = shader.fragmentShader
+                .replace('#include <clipping_planes_pars_fragment>', '#include <clipping_planes_pars_fragment>\n#include <alphamap_pars_fragment>\n#include <alphatest_pars_fragment>')
+                .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\n#include <alphamap_fragment>\n#include <alphatest_fragment>');
+        };
+        lineNormalMaterials.set(material, m);
+    }
+    return m;
+}
+const lineSwapped = [];
+function swapToNormalMaterials() {
+    modelPivot.traverse((child) => {
+        if (!child.isMesh) return;
+        lineSwapped.push(child, child.material);
+        child.material = Array.isArray(child.material) ? child.material.map(lineNormalMaterial) : lineNormalMaterial(child.material);
+    });
+}
+function restoreMaterials() {
+    for (let i = 0; i < lineSwapped.length; i += 2) lineSwapped[i].material = lineSwapped[i + 1];
+    lineSwapped.length = 0;
+}
+const lineQuadVertex = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
+// 1단계: 픽셀마다 선 종류를 r(바깥) g(부품) b(접힘)에 기록
+const edgeMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+        tNormal: { value: lineTarget.texture },
+        tDepth: { value: lineTarget.depthTexture },
+        size: { value: new THREE.Vector2(1, 1) },
+        cameraNear: { value: 1 },
+        cameraFar: { value: 1 },
+        ortho: { value: 0 },
+        creaseCos: { value: LINE_CREASE_COS },
+    },
+    vertexShader: lineQuadVertex,
+    fragmentShader: `${DEPTH_EDGE_GLSL}
+uniform sampler2D tNormal;
+uniform float creaseCos;
+varying vec2 vUv;
+bool covered(vec2 p) { return texture2D(tDepth, (p + 0.5) / size).x < 1.0; }
+vec3 nrm(vec2 p) { return texture2D(tNormal, (p + 0.5) / size).xyz * 2.0 - 1.0; }
+void main() {
+    vec2 p = floor(vUv * size);
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    if (!covered(p)) return;
+    vec2 o[4] = vec2[4](vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));
+    float c = invDepth(p);
+    vec3 n = nrm(p);
+    for (int i = 0; i < 4; i++) {
+        vec2 q = p + o[i];
+        if (!covered(q)) { gl_FragColor.r = 1.0; continue; }
+        if (edge(c, invDepth(q), invDepth(p - o[i]))) gl_FragColor.g = 1.0;
+        // 접힘선은 한쪽(+x, +y 이웃과 비교)에만 그려서 1px
+        else if (i % 2 == 0 && dot(n, nrm(q)) < creaseCos) gl_FragColor.b = 1.0;
+    }
+}`,
+    depthTest: false,
+    depthWrite: false,
+});
+// 2단계: 켠 선 종류를 선 두께 반경 안에서 찾아 넓히고, 채우기·배경과 합침
+const lineMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+        tEdge: { value: edgeTarget.texture },
+        tDepth: { value: lineTarget.depthTexture },
+        size: { value: new THREE.Vector2(1, 1) },
+        mask: { value: new THREE.Vector3(1, 1, 1) },
+        radius: { value: 1 },
+        fill: { value: 0 }, // 0: 흰색, 1: 없음(배경), 2: 실루엣
+        background: { value: new THREE.Color() },
+        clear: { value: 0 }, // 1: 저장용 투명 배경 (배경·채우기 없음 자리는 알파 0)
+    },
+    vertexShader: lineQuadVertex,
+    fragmentShader: `uniform sampler2D tEdge;
+uniform sampler2D tDepth;
+uniform vec2 size;
+uniform vec3 mask;
+uniform float radius;
+uniform float fill;
+uniform vec3 background;
+uniform float clear;
+varying vec2 vUv;
+const int MAX_RADIUS = 3; // 선 두께 4px까지
+void main() {
+    vec2 p = floor(vUv * size);
+    bool line = false;
+    for (int y = -MAX_RADIUS; y <= MAX_RADIUS; y++) {
+        for (int x = -MAX_RADIUS; x <= MAX_RADIUS; x++) {
+            vec2 d = vec2(x, y);
+            if (line || dot(d, d) > radius * radius + 0.5) continue;
+            if (dot(texture2D(tEdge, (p + d + 0.5) / size).rgb, mask) > 0.5) line = true;
+        }
+    }
+    bool covered = texture2D(tDepth, (p + 0.5) / size).x < 1.0;
+    vec3 color = background;
+    if (covered && fill < 0.5) color = vec3(1.0);
+    if (covered && fill > 1.5) color = vec3(0.0);
+    if (line) color = fill > 1.5 && covered ? vec3(1.0) : vec3(0.0); // 실루엣 채우기 위에서는 흰 선
+    gl_FragColor = vec4(color, 1.0);
+    if (clear > 0.5 && !line && !(covered && (fill < 0.5 || fill > 1.5))) gl_FragColor = vec4(0.0);
+    #include <colorspace_fragment>
+}`,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+});
+const edgeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), edgeMaterial);
+edgeQuad.frustumCulled = false;
+const lineQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), lineMaterial);
+lineQuad.frustumCulled = false;
+function applyLineOptions() {
+    lineWidthText.textContent = lineWidthSlider.value;
+    lineMaterial.uniforms.mask.value.set(lineOutlineToggle.checked ? 1 : 0, linePartToggle.checked ? 1 : 0, lineCreaseToggle.checked ? 1 : 0);
+    lineMaterial.uniforms.radius.value = lineWidthSlider.valueAsNumber - 1;
+    lineMaterial.uniforms.fill.value = { white: 0, none: 1, silhouette: 2 }[lineFillSelect.value];
+}
+for (const el of [lineOutlineToggle, linePartToggle, lineCreaseToggle, lineFillSelect]) el.addEventListener('change', applyLineOptions);
+lineWidthSlider.addEventListener('input', applyLineOptions);
+applyLineOptions();
+function renderLine() {
+    renderer.getDrawingBufferSize(drawSize);
+    const w = drawSize.x, h = drawSize.y;
+    if (lineTarget.width !== w || lineTarget.height !== h) {
+        lineTarget.setSize(w, h);
+        edgeTarget.setSize(w, h);
+        edgeMaterial.uniforms.size.value.set(w, h);
+        lineMaterial.uniforms.size.value.set(w, h);
+    }
+    if (activeCamera === orthoCamera) syncOrthoCamera();
+    edgeMaterial.uniforms.cameraNear.value = activeCamera.near;
+    edgeMaterial.uniforms.cameraFar.value = activeCamera.far;
+    edgeMaterial.uniforms.ortho.value = activeCamera === orthoCamera ? 1 : 0;
+    lineMaterial.uniforms.background.value.copy(scene.background?.isColor ? scene.background : BACKGROUND_COLOR);
+    const gizmoVisible = gizmoHelper.visible;
+    const background = scene.background;
+    gizmoHelper.visible = false;
+    scene.background = null;
+    swapToNormalMaterials();
+    renderer.setRenderTarget(lineTarget);
+    renderer.render(scene, activeCamera);
+    restoreMaterials();
+    scene.background = background;
+    renderer.setRenderTarget(edgeTarget);
+    renderer.render(edgeQuad, pixelCamera);
+    renderer.setRenderTarget(null);
+    renderer.render(lineQuad, pixelCamera);
+    gizmoHelper.visible = gizmoVisible;
+    if (gizmoVisible) {
+        renderer.autoClear = false;
+        renderer.render(gizmoHelper, activeCamera);
+        renderer.autoClear = true;
+    }
+}
+
+// 카툰: 게임 셰이더 패치 끝의 카툰 분기(s3Toon)로 셀 셰이딩하고, 선화의 깊이 검출로 색 외곽선(그 자리 색 × TOON_LINE_DARK)을 덧그림 (길티기어식)
+// - 4x MSAA 렌더 타겟에 그린 뒤 깊이로 바깥선·부품선을 찾음. 노멀 패스는 안 써서 장면은 1번만 그림 (접힘선 없음)
+// - 렌더 타겟에 그리므로 톤맵·sRGB는 화면에 옮기는 패스에서 적용 (픽셀과 같음)
+const TOON_LINE_DARK = 0.35;
+const toonStepsSelect = document.getElementById('toon-steps');
+const toonSoftSlider = document.getElementById('toon-soft');
+const toonRimToggle = document.getElementById('toon-rim');
+const toonOutlineToggle = document.getElementById('toon-outline');
+const toonWidthSlider = document.getElementById('toon-width');
+const toonWidthText = document.getElementById('toon-width-text');
+const toonTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+toonTarget.depthTexture = new THREE.DepthTexture(1, 1);
+const toonEdgeMaterial = edgeMaterial.clone();
+toonEdgeMaterial.uniforms.tNormal.value = toonTarget.texture;
+toonEdgeMaterial.uniforms.tDepth.value = toonTarget.depthTexture;
+toonEdgeMaterial.uniforms.creaseCos.value = -2; // 접힘선 없음
+const toonEdgeQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), toonEdgeMaterial);
+toonEdgeQuad.frustumCulled = false;
+const toonMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+        tScene: { value: toonTarget.texture },
+        tEdge: { value: edgeTarget.texture },
+        size: { value: new THREE.Vector2(1, 1) },
+        radius: { value: 1 },
+        outline: { value: 1 },
+    },
+    vertexShader: lineQuadVertex,
+    fragmentShader: `uniform sampler2D tScene;
+uniform sampler2D tEdge;
+uniform vec2 size;
+uniform float radius;
+uniform float outline;
+varying vec2 vUv;
+const int MAX_RADIUS = 3; // 선 두께 4px까지
+void main() {
+    vec2 p = floor(vUv * size);
+    vec2 src = p;
+    bool line = false;
+    if (outline > 0.5) {
+        for (int y = -MAX_RADIUS; y <= MAX_RADIUS; y++) {
+            for (int x = -MAX_RADIUS; x <= MAX_RADIUS; x++) {
+                vec2 d = vec2(x, y);
+                if (line || dot(d, d) > radius * radius + 0.5) continue;
+                if (dot(texture2D(tEdge, (p + d + 0.5) / size).rg, vec2(1.0)) > 0.5) { line = true; src = p + d; }
+            }
+        }
+    }
+    // 선은 선이 검출된 (모델 쪽) 픽셀의 색을 어둡게 해서 씀
+    gl_FragColor = texture2D(tScene, (src + 0.5) / size);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+    if (line) gl_FragColor.rgb *= ${TOON_LINE_DARK.toFixed(2)};
+}`,
+    depthTest: false,
+    depthWrite: false,
+});
+const toonQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), toonMaterial);
+toonQuad.frustumCulled = false;
+function applyToonOptions() {
+    toonWidthText.textContent = toonWidthSlider.value;
+    toonWidthSlider.parentElement.hidden = !toonOutlineToggle.checked;
+    gameEnv.s3Toon.value.set(toonMode ? 1 : 0, Number(toonStepsSelect.value), toonSoftSlider.valueAsNumber, toonRimToggle.checked ? 1 : 0);
+    toonMaterial.uniforms.outline.value = toonOutlineToggle.checked ? 1 : 0;
+    toonMaterial.uniforms.radius.value = toonWidthSlider.valueAsNumber - 1;
+}
+for (const el of [toonStepsSelect, toonRimToggle, toonOutlineToggle]) el.addEventListener('change', applyToonOptions);
+for (const el of [toonSoftSlider, toonWidthSlider]) el.addEventListener('input', applyToonOptions);
+applyToonOptions();
+// 카툰 명암의 기준 = 지금 켜진 직접광 중 가장 밝은 것 (인게임: 게임 주광)
+const toonKeyLights = [dirLight, dirLight2, bottomLight, bottomLight2, gameLight];
+const toonKeyColor = new THREE.Color();
+function updateToonKey() {
+    let best = 0;
+    gameEnv.s3ToonKey.value.setRGB(0, 0, 0);
+    for (const light of toonKeyLights) {
+        if (!light.visible) continue;
+        toonKeyColor.copy(light.color).multiplyScalar(light.intensity);
+        const lum = toonKeyColor.r * 0.299 + toonKeyColor.g * 0.587 + toonKeyColor.b * 0.114;
+        if (lum > best) {
+            best = lum;
+            gameEnv.s3ToonKey.value.copy(toonKeyColor);
+        }
+    }
+}
+function renderToon() {
+    renderer.getDrawingBufferSize(drawSize);
+    const w = drawSize.x, h = drawSize.y;
+    if (toonTarget.width !== w || toonTarget.height !== h) {
+        toonTarget.setSize(w, h);
+        toonMaterial.uniforms.size.value.set(w, h);
+    }
+    if (edgeTarget.width !== w || edgeTarget.height !== h) edgeTarget.setSize(w, h);
+    toonEdgeMaterial.uniforms.size.value.set(w, h);
+    if (activeCamera === orthoCamera) syncOrthoCamera();
+    toonEdgeMaterial.uniforms.cameraNear.value = activeCamera.near;
+    toonEdgeMaterial.uniforms.cameraFar.value = activeCamera.far;
+    toonEdgeMaterial.uniforms.ortho.value = activeCamera === orthoCamera ? 1 : 0;
+    updateToonKey();
+    const gizmoVisible = gizmoHelper.visible;
+    gizmoHelper.visible = false;
+    renderer.setRenderTarget(toonTarget);
+    renderer.render(scene, activeCamera);
+    if (toonOutlineToggle.checked) {
+        renderer.setRenderTarget(edgeTarget);
+        renderer.render(toonEdgeQuad, pixelCamera);
+    }
+    renderer.setRenderTarget(null);
+    renderer.render(toonQuad, pixelCamera);
+    gizmoHelper.visible = gizmoVisible;
+    if (gizmoVisible) {
+        renderer.autoClear = false;
+        renderer.render(gizmoHelper, activeCamera);
+        renderer.autoClear = true;
+    }
+}
+
+function renderFrame() {
+    if (lineMode) {
+        renderLine();
+        return;
+    }
+    if (toonMode) {
+        renderToon();
+        return;
+    }
+    if (!pixelMode) {
+        if (activeCamera === orthoCamera) syncOrthoCamera();
+        renderer.render(scene, activeCamera);
+        return;
+    }
+    renderer.getDrawingBufferSize(drawSize);
+    const n = pixelSizeSlider.valueAsNumber;
+    const w = Math.max(1, Math.round(drawSize.x / n)), h = Math.max(1, Math.round(drawSize.y / n));
+    if (pixelTarget.width !== w || pixelTarget.height !== h) {
+        pixelTarget.setSize(w, h);
+        pixelMaterial.uniforms.size.value.set(w, h);
+    }
+    if (activeCamera === orthoCamera) syncOrthoCamera(w, h);
+    pixelMaterial.uniforms.cameraNear.value = activeCamera.near;
+    pixelMaterial.uniforms.cameraFar.value = activeCamera.far;
+    pixelMaterial.uniforms.ortho.value = activeCamera === orthoCamera ? 1 : 0;
+    const gizmoVisible = gizmoHelper.visible;
+    gizmoHelper.visible = false;
+    renderer.setRenderTarget(pixelTarget);
+    renderer.render(scene, activeCamera);
+    renderer.setRenderTarget(null);
+    renderer.render(pixelQuad, pixelCamera);
+    gizmoHelper.visible = gizmoVisible;
+    if (gizmoVisible) {
+        renderer.autoClear = false;
+        renderer.render(gizmoHelper, activeCamera);
+        renderer.autoClear = true;
+    }
+}
+
+// 애니메이션 일시정지: 모든 무기군 공통. 시간만 멈추고 버튼·슬라이더(차지 등)는 그대로 동작
+let animPaused = false;
+const pauseButton = document.getElementById('anim-pause');
+pauseButton.addEventListener('click', () => {
+    animPaused = !animPaused;
+    pauseButton.textContent = animPaused ? '▶ 재생' : '⏸ 일시정지';
+});
+
+// 저장 (PNG·GIF·WebP, 화면은 export.js): 지금 셰이더·투영 그대로, 캔버스 크기로, 배경은 투명하게, 회전 기즈모는 빼고 그림
+// 배경(scene.background)만 빼면 렌더러(alpha: true)가 투명하게 지움. 픽셀·카툰은 렌더 타겟의 알파가 그대로 화면까지 옴, 선화는 lineMaterial.clear로 배경 칠을 끔
+const grabCanvas = document.createElement('canvas');
+const grabContext = grabCanvas.getContext('2d', { willReadFrequently: true });
+function grabTransparent() {
+    const background = scene.background;
+    const gizmoVisible = gizmoHelper.visible;
+    scene.background = null;
+    gizmoHelper.visible = false;
+    lineMaterial.uniforms.clear.value = 1;
+    renderFrame();
+    scene.background = background;
+    gizmoHelper.visible = gizmoVisible;
+    lineMaterial.uniforms.clear.value = 0;
+    const { width, height } = renderer.domElement;
+    if (!width || !height) return null; // 창이 접혀 크기가 0
+    if (grabCanvas.width !== width || grabCanvas.height !== height) {
+        grabCanvas.width = width;
+        grabCanvas.height = height;
+    } else {
+        grabContext.clearRect(0, 0, width, height);
+    }
+    grabContext.drawImage(renderer.domElement, 0, 0); // 그린 직후(같은 작업 안)라 preserveDrawingBuffer 없이 읽힘
+    return grabContext.getImageData(0, 0, width, height);
+}
+let exportName = 'weapon';
+const exportCropToggle = document.getElementById('export-crop');
+document.getElementById('save-png').addEventListener('click', () => {
+    const image = grabTransparent();
+    renderFrame(); // 화면은 다시 배경 있게
+    if (image) savePng(image, exportCropToggle.checked, safeName(exportName));
+});
+// 움짤 녹화: 정해진 fps로 시간을 딱 1/fps씩 진행하면서(애니메이션·자동 회전 모두) 매 프레임을 캡처. 화면 갱신도 그 fps로 맞춰서 실제 속도로 보임
+// 녹화 중에 버튼(발사 등)을 누르거나 끌어서 돌리면 그대로 담김. 녹화 중 화면은 투명 배경(체크무늬)
+// 프레임은 투명 여백을 잘라서 보관. 메모리 보호로 REC_MAX_BYTES를 넘으면 거기서 멈춤
+const REC_MAX_BYTES = 1.5e9;
+const recFps = document.getElementById('rec-fps');
+const recLength = document.getElementById('rec-length');
+const recTurn = document.getElementById('rec-turn');
+const recButton = document.getElementById('rec-start');
+let recording = null; // { fps, step, acc, frames, bytes, total, width, height, smooth }
+function startRecording() {
+    const fps = Number(recFps.value);
+    const { width, height } = renderer.domElement;
+    recording = { fps, step: 1 / fps, acc: 1 / fps, frames: [], bytes: 0, total: Math.max(1, Math.round(recLength.valueAsNumber * fps) || 1), width, height, smooth: !pixelMode };
+    recButton.classList.add('recording');
+    recButton.textContent = '■ 중지';
+}
+function stopRecording() {
+    const rec = recording;
+    recording = null;
+    recButton.classList.remove('recording');
+    recButton.textContent = '● 움짤 녹화';
+    renderFrame();
+    if (rec.frames.length) openSequenceEditor({ ...rec, name: safeName(exportName) });
+}
+function captureFrame() {
+    const image = grabTransparent();
+    if (!image) return;
+    const frame = cropFrame(image);
+    recording.frames.push(frame);
+    recording.bytes += frame.image?.data.length ?? 0;
+    recButton.textContent = `■ 중지 (${recording.frames.length}/${recording.total})`;
+    if (recording.frames.length >= recording.total) stopRecording();
+    else if (recording.bytes > REC_MAX_BYTES) {
+        stopRecording();
+        alert('메모리가 많이 들어서 녹화를 여기서 멈췄어. 길이를 줄이거나 창을 작게 해서 다시 녹화해 줘.');
+    }
+}
+recButton.addEventListener('click', () => (recording ? stopRecording() : startRecording()));
+// 자동 회전 중이면 한 바퀴(= 처음과 끝이 이어지는 길이)를 녹화 길이로 넣는 버튼을 보임
+function updateRecTurn() { recTurn.hidden = !autoRotate; }
+autoButton.addEventListener('click', updateRecTurn);
+updateRecTurn();
+recTurn.addEventListener('click', () => {
+    recLength.value = (2 * Math.PI / (AUTO_ROTATE_SPEED * speedSlider.valueAsNumber)).toFixed(2);
+});
+
 // 5. 애니메이션 루프
 const timer = new THREE.Timer();
 function animate(timestamp) {
     requestAnimationFrame(animate);
     timer.update(timestamp);
-    const dt = timer.getDelta();
+    let dt = timer.getDelta();
+    if (editor.open) return; // 움짤 편집 중에는 3D 화면을 안 그림 (편집기가 가림)
+    if (recording) {
+        // 녹화 fps 간격이 될 때만 진행. 느린 기기에서 밀린 시간은 버려서 프레임 간격은 항상 1/fps
+        recording.acc += dt;
+        if (recording.acc < recording.step) return;
+        recording.acc = Math.min(recording.acc - recording.step, recording.step);
+        dt = recording.step;
+    }
     if (autoRotate) {
         modelPivot.quaternion.premultiply(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * speedSlider.valueAsNumber * dt));
         showRotation();
     }
-    if (mixers.length) {
+    if (mixers.length && !animPaused) {
         for (const m of mixers) m.update(dt);
         applyUvProxies();
     }
     controls.update(); // 컨트롤러 업데이트
-    renderer.render(scene, camera);
+    if (recording) captureFrame();
+    else renderFrame();
 }
 animate();
+
+// 우측 패널 묶음(셰이더·조명·회전)을 잉크 색 패널 바로 위에 둠. 패널 높이가 바뀌어도 위로만 늘어나서 잉크 색 패널과 안 겹침
+const rightStack = document.getElementById('right-stack');
+const colorPickerPanel = document.getElementById('color-picker-container');
+function placeRightStack() {
+    const ui = rightStack.offsetParent.getBoundingClientRect();
+    rightStack.style.bottom = `${ui.bottom - colorPickerPanel.getBoundingClientRect().top + 10}px`;
+}
+new ResizeObserver(placeRightStack).observe(colorPickerPanel);
+window.addEventListener('resize', placeRightStack);
+placeRightStack();
 
 // 창 크기 조절 대응
 window.addEventListener('resize', () => {
@@ -1369,9 +2075,7 @@ const weaponData = [
                 {name: '제트 스위퍼', file: 'Long'},
                 {name: '커스텀 제트 스위퍼', file: 'Long_Cstm01'},
                 {name: '제트 스위퍼 COBR', file: 'Long_Cstm02'},
-                {name: '히어로 슈터(Lv0)', file: 'Msn0Lv0'},
-                {name: '히어로 슈터(Lv1)', file: 'Msn0Lv1'},
-                {name: '히어로 슈터(Lv2)', file: 'Msn0Lv2'},
+                {name: '히어로 슈터', file: 'Msn0Lv0'}, // Lv1·Lv2는 animBar의 레벨 슬라이더로
                 //name: '스플랫 슈터(Splatoon1)', file: 'Normal'},
                 //name: '스플랫 슈터 컬래버(Splatoon1)', file: 'Normal_Cstm'},
                 //name: '스플랫 슈터(Splatoon2)', file: 'NormalB'},
@@ -1603,7 +2307,10 @@ weaponData.forEach(cat => {
             const li = document.createElement('li');
             li.textContent = item.name;
             const name = `Wmn_${cat.id}_${item.file}`;
-            li.onclick = () => loadGlb(`glb/${name}.glb`, cat.id === 'Maneuver');
+            li.onclick = () => {
+                exportName = item.name;
+                loadGlb(`glb/${name}.glb`, cat.id === 'Maneuver');
+            };
             modelList.appendChild(li);
         });
     };
