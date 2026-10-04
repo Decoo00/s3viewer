@@ -12,18 +12,15 @@ https://decoo00.github.io/s3viewer/
 
 ### 수록 무기
 - 스플래툰 3 v11.3.0 기준 메인 웨폰 전 카테고리 수록
-- 커스텀(바리에이션) 무기 포함
 
 ### 렌더링
-- 게임 셰이더 규칙에 최대한 맞춘 렌더링 (임의 보정 없이, 확인된 규칙만 적용)
+- 게임 셰이더 규칙에 최대한 맞춘 렌더링
 - 셰이더 종류: 인게임 / 픽셀 / 선화 / 카툰
 - 원근 / 직교 카메라 전환
 - 잉크 색 프리셋, 배경색 프리셋
 
 ### 애니메이션
 - 무기별 동작 재현: 차지, 발사, 셸터 펴기/접기, 스트링거 가로/세로 차지, 와이퍼 차지/공격 등
-- 발광·텍스처가 바뀌는 애니메이션도 게임과 같게 연결
-- 히어로 슈터 레벨 슬라이더
 - 일시정지 버튼으로 원하는 순간에 멈춰서 관찰
 
 ### 저장
@@ -45,18 +42,15 @@ It runs right in the browser with no installation, and is built to stay lightwei
 
 ### Weapons
 - Every main weapon category in Splatoon 3, as of v11.3.0
-- Includes custom (variant) weapons
-
+- 
 ### Rendering
-- Rendering that follows the game's shader rules as closely as possible (no arbitrary tweaks, only verified rules are applied)
+- Rendering that follows the game's shader rules as closely as possible
 - Shader modes: In-game / Pixel / Line art / Cartoon
 - Perspective / orthographic camera
 - Ink color presets and background color presets
 
 ### Animations
 - Per-weapon actions: charge, fire, Brella open/close, Stringer horizontal/vertical charge, Splatana charge/attack, and more
-- Animations that change emission or textures are wired up the same way as in the game
-- Hero Shot level slider
 - Pause button to freeze any moment
 
 ### Export
