@@ -59,14 +59,21 @@
             gap: 10px;
             pointer-events: none;
         }
-        #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel, #shader-panel, #anim-bar, #export-panel { pointer-events: auto; }
+        #side-panel, #category-bar, #color-picker-container, #rotation-panel, #light-panel, #shader-panel, #anim-bar, #char-bar, #export-panel { pointer-events: auto; }
         #category-wrap { position: relative; max-width: 100%; } /* 카테고리 바: 넓은 화면에선 원래 폭 그대로 가운데, 좁으면 화면 폭 전체까지 (다른 패널 자리를 비켜 주지 않음). animBar의 max-width 기준 */
-        #anim-bar { /* 임시: 모델 애니메이션 조작. 카테고리 바 바로 위에 띄워서 레이아웃 높이에 넣지 않음 (나타나고 사라져도 좌측 패널·잉크 색 위치가 그대로) */
+        /* 카테고리 바 바로 위에 캐릭터 바, 그 아래 애니메이션 바를 띄움. 레이아웃 높이에 넣지 않음 (나타나고 사라져도 좌측 패널·잉크 색 위치가 그대로) */
+        #above-bar {
             position: absolute;
             bottom: calc(100% + 10px);
             left: 0;
             right: 0;
-            margin: 0 auto; /* 가운데 정렬 */
+            display: flex;
+            flex-direction: column;
+            align-items: center; /* 가운데 정렬 */
+            gap: 10px;
+            pointer-events: none;
+        }
+        #anim-bar, #char-bar { /* 임시: 모델 애니메이션 조작 */
             width: fit-content;
             max-width: 100%;
             box-sizing: border-box;
@@ -191,6 +198,8 @@
         /* 언어 선택: 좌하단 구석 (카테고리 바가 잉크 색 패널 폭만큼 양쪽을 비워 둔 자리) */
         /* 좌측 아래 잉크 색 패널 자리: #ui 세로 흐름에서 하단 바 바로 위 (margin-top: auto로 아래쪽에 붙고, 무기 목록은 남은 높이 안에서 줄어듦) */
         #left-bottom { margin-top: auto; flex-shrink: 0; }
+        /* 일시정지: 무기·캐릭터 애니메이션 전부. 무기와 상관없이 늘 보임 (잉크·배경 색 패널 바로 위) */
+        #anim-pause { display: block; margin-bottom: 8px; pointer-events: auto; font-family: var(--font); }
         /* 우측 최상단: 저작권 표기·문의 (상자 없이 작은 회색 글자 한 줄씩), 그 아래 언어 선택. 우측 패널 묶음은 이 아래부터 (main.js placeRightStack) */
         #top-right {
             position: absolute;
@@ -245,6 +254,16 @@
         /* 잉크 색·배경 색을 옆으로 나란히 (세로로 쌓으면 위쪽 우측 패널이 화면 밖으로 밀림) */
         #color-picker-container .color-item { display: flex; flex-direction: column; align-items: center; gap: 5px; }
         #color-picker-container [hidden] { display: none; }
+        /* 캐릭터 피부·눈 프리셋: 버튼을 누르면 위로 견본 격자가 뜸 */
+        .preset-button { width: 44px; height: 44px; margin: 3px; border: 2px solid rgba(255, 255, 255, 0.6); border-radius: 4px; cursor: pointer; padding: 0; }
+        .preset-palette {
+            position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 20;
+            display: grid; grid-template-columns: repeat(7, 28px); gap: 6px;
+            background: rgba(0, 0, 0, 0.85); padding: 10px; border-radius: 10px;
+        }
+        .preset-palette[hidden] { display: none; }
+        .preset-swatch { width: 28px; height: 28px; border: 2px solid transparent; border-radius: 50%; cursor: pointer; padding: 0; }
+        .preset-swatch.active { border-color: #f0fd01; }
         #team-color-input, #bg-color-input {
             width: 50px;
             height: 50px;
@@ -340,7 +359,7 @@
     </style>
 </head>
 <body>
-    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.7</div></div>
+    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.8</div></div>
     <div id="ui">
         <div id="top-right">
             <div class="note" data-i18n="copyright.notice">Splatoon 3 및 관련 이미지·모델 © Nintendo. 비공식 팬 제작 뷰어입니다.</div>
@@ -353,6 +372,7 @@
             <button class="toggle-btn" aria-label="무기 목록 숨기기/펼치기" data-i18n-aria="list.toggle"></button>
         </div>
         <div id="left-bottom">
+            <button id="anim-pause" data-i18n="anim.pause">⏸ 일시정지</button>
             <div id="color-picker-container" class="collapsible left">
                 <button class="toggle-btn" aria-label="색 패널 숨기기/펼치기" data-i18n-aria="color.toggle"></button>
                 <div class="color-item">
@@ -369,6 +389,16 @@
                     <option value="#aef4f0"></option>
                 </datalist>
                 </div>
+                <div class="color-item" id="skin-item" hidden>
+                <label data-i18n="color.skin">피부</label>
+                <button id="skin-button" class="preset-button" aria-label="피부" data-i18n-aria="color.skin"></button>
+                <div id="skin-palette" class="preset-palette" hidden></div>
+                </div>
+                <div class="color-item" id="eye-item" hidden>
+                <label data-i18n="color.eye">눈</label>
+                <button id="eye-button" class="preset-button" aria-label="눈" data-i18n-aria="color.eye"></button>
+                <div id="eye-palette" class="preset-palette" hidden></div>
+                </div>
                 <div class="color-item">
                 <label data-i18n="color.bg">배경 색</label>
                 <input type="color" id="bg-color-input" value="#a0a0a0" list="bg-presets">
@@ -384,8 +414,15 @@
         </div>
         <div id="bottom-bar">
             <div id="category-wrap">
+                <div id="above-bar">
+                <div id="char-bar"><span data-i18n="chr.label">캐릭터</span> <select id="character-select">
+                    <option value="none" selected data-i18n="chr.none">없음</option>
+                    <option value="inkF" data-i18n="chr.inkF">잉클링 (여)</option>
+                    <option value="inkM" data-i18n="chr.inkM">잉클링 (남)</option>
+                    <option value="octF" data-i18n="chr.octF">옥토링 (여)</option>
+                    <option value="octM" data-i18n="chr.octM">옥토링 (남)</option>
+                </select> <button id="hold-toggle" hidden data-i18n="chr.hold">무기 들기</button></div>
                 <div id="anim-bar" hidden>
-                    <button id="anim-pause" data-i18n-cat="pause">⏸ 일시정지</button>
                     <button id="fold-toggle" hidden data-i18n="roller.fold">접기</button>
                     <button id="brush-toggle" hidden data-i18n="brush.push">밀기</button>
                     <button id="shot-toggle" hidden data-i18n="shot.toShort">단거리 모드로</button>
@@ -394,6 +431,7 @@
                     <button id="pose-toggle" hidden data-i18n="brush.toAttack">공격 모드</button>
                     <button id="attack-button" hidden data-i18n-cat="attack">휘두르기</button>
                     <button id="slosher-swing-button" hidden data-i18n="slosher.swing">휘두르기</button>
+                    <span id="ws-anims" hidden></span>
                     <button id="shelter-toggle" hidden data-i18n="shelter.fold">접기</button>
                     <button id="shelter-eject-toggle" hidden data-i18n="shelter.eject">사출</button>
                     <span id="stringer-state" hidden><label><input type="radio" name="stringer-state" value="Default" checked> <span data-i18n="stringer.default">기본</span></label> <label><input type="radio" name="stringer-state" value="ChargeWidth"> <span data-i18n="stringer.chargeWidth">가로 차지</span></label> <label><input type="radio" name="stringer-state" value="Charge"> <span data-i18n="stringer.charge">세로 차지</span></label></span>
@@ -410,6 +448,7 @@
                     <label hidden><span data-i18n-cat="level">레벨</span> <input type="range" id="hero-level" min="0" max="2" step="1" value="0"> <span id="hero-level-text">Lv0</span></label>
                     <label hidden><select id="hand-select"><option value="R" data-i18n="hand.R">오른손</option><option value="L" data-i18n="hand.L">왼손</option><option value="both" data-i18n="hand.both">양손</option></select></label>
                     <label hidden><input type="checkbox" id="hand-stagger"> <span data-i18n="hand.stagger">사선 배치</span></label>
+                </div>
                 </div>
                 <div id="category-bar"></div>
             </div>

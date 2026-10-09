@@ -59,7 +59,23 @@ foreach (var anim in res.ShaderParamAnims.Values)
     }
     shaderParam[anim.Name] = new { frameCount = anim.FrameCount, loop = anim.Loop, materials };
 }
-Console.WriteLine(JsonSerializer.Serialize(new { skeletal, boneVisibility, shaderParam }, new JsonSerializerOptions { WriteIndented = true }));
+// 텍스처 패턴 애니메이션 쪽에 든 셰이더 파라미터 커브 (v10 bfres는 머티리얼 애니메이션 하나에 둘 다 담음. 예: 캐릭터 Wait의 M_Eye tex_mtx0 = 눈동자 이동)
+var materialParam = new Dictionary<string, object>();
+foreach (var anim in res.TexPatternAnims.Values)
+{
+    var materials = new Dictionary<string, object>();
+    foreach (var m in anim.MaterialAnimDataList)
+    {
+        var ps = m.ParamAnimInfos.Select(p => new
+        {
+            param = p.Name,
+            curves = m.Curves.Skip(p.BeginCurve).Take(p.FloatCurveCount).Select(Curve).ToArray(),
+        }).Where(p => p.curves.Length > 0).ToArray();
+        if (ps.Length > 0) materials[m.Name] = ps;
+    }
+    if (materials.Count > 0) materialParam[anim.Name] = new { frameCount = anim.FrameCount, loop = anim.Loop, materials };
+}
+Console.WriteLine(JsonSerializer.Serialize(new { skeletal, boneVisibility, shaderParam, materialParam }, new JsonSerializerOptions { WriteIndented = true }));
 
 // BfresLibrary 버그 우회: bool 옵션이 0개인 머티리얼은 bit flag 오프셋이 0이라 _optionBitFlags가 null이 되고,
 // SetupOptionBooleans의 ToArray에서 터진다 (예: Wmn_Blaster_LightShort_Cstm01의 M_Sticker_Cstm01). 빈 플래그로 채운다

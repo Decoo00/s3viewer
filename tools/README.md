@@ -48,3 +48,18 @@ BFRASS=/path/to/bfrass python tools/build_glb.py <추출한 Model 폴더> glb
 - `node.extras.s3.visibility`: 본 보임/숨김 애니메이션 → 그 본에 붙은 메시의 `{애니메이션: [[초, 보임], ...]}` (예: 와이드 롤러 빨대). 마지막 키 뒤에 애니메이션 끝까지 값을 유지하는 키를 넣는다
 - `material.extras.s3.param_anims`: 셰이더 파라미터 애니메이션 `{애니메이션: {loop, duration, tracks: [{param, target, times, values}]}}`.
   `ANIMATIONS`에 있는 이름과 `_auto`로 끝나는 이름만 (예: 와이드 롤러 헤드 `tex_mtx0`, 히어로 슈터 `emission_intensity`)
+
+## 캐릭터 애니메이션 (`build_player_anims.py`)
+
+```sh
+BFRASS=/path/to/bfrass python tools/build_player_anims.py <추출한 Model 폴더> glb/anim
+```
+
+- Player00~03의 `Wait`, `Shop_Wait_<무기군>`을 애니메이션만 든 glb(메시 없음)로 만든다. 출처 우선순위와 형식은 스크립트 첫 주석 참고.
+- 눈동자 이동(M_Eye `tex_mtx0`)을 넣으려고 fska_dump가 `materialParam`(텍스처 패턴 애니메이션 쪽 셰이더 파라미터 커브)도 출력하게 바꿨다.
+  `cloud_toolkit` 묶음의 fska_dump는 예전 빌드라 이 키가 없다. 위 방법으로 `tools/fska_dump/out`을 다시 빌드해서 `FSKA_DUMP`로 지정해야 한다 (2026-10-09에는 Windows .NET SDK 9로 net8 빌드).
+
+## 캐릭터 장비 (`build_glb.py` + `build_gear_masks.py`)
+
+- 장비 모델은 `build_glb.py`로 변환한다 (예: 패턴 `"Clt_*.bfres.zs"`). 상의·하의는 `<RowId>_F/_M`, 신발은 `<RowId>` 하나.
+- `build_gear_masks.py <romfs> glb`: 몸 가리기 마스크 `glb/mask/*.png`(GearAlphaMask.bfres 75장)와 장비 표 `glb/gear.json`(RSDB GearInfoClothes·BottomInfo·GearInfoShoes의 AlphaMaskF/M/V1). romfs는 `Model`·`RSDB` 폴더가 있는 곳.

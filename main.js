@@ -40,7 +40,9 @@ scene.add(hemiLight);
 const dirLight = new THREE.DirectionalLight(0xffffff, 4);
 dirLight.position.set(1, 2, 1);
 // 그림자 범위 설정 (모델 크기에 맞춰 조정 필요)
+const shadowLights = []; // fitShadows가 모델 크기에 맞춤
 function castShadow(light) {
+    shadowLights.push({ light, distance: light.position.length() });
     light.castShadow = true;
     light.shadow.camera.left = -1;
     light.shadow.camera.right = 1;
@@ -531,12 +533,19 @@ function clearModel() {
         disposeModel(currentModel);
         currentModel = null;
     }
+    for (const part of heldParts) {
+        part.removeFromParent();
+        disposeModel(part);
+    }
+    heldParts.length = 0;
     for (const m of mixers) {
         m.stopAllAction();
         m.uncacheRoot(m.getRoot());
     }
     mixers = [];
     uvProxies.length = 0;
+    exprProxies.length = 0;
+    refractDepth.meshes.length = 0;
     // animBar는 여기서 숨기지 않는다. 로드가 끝날 때 한 번에 갱신해서 로드 중에 바가 깜빡이지 않게
 }
 function hideAnimControls() {
@@ -552,7 +561,8 @@ function setCatText(el, base) {
     setText(el, `${animCat}.${base}`);
 }
 function relabelAnimBar(path) {
-    animCat = path.match(/Wmn_([A-Za-z]+)_/)[1].toLowerCase();
+    const m = path.match(/Wmn_([A-Za-z]+)_|(Ws[bp])_/); // 서브·스페셜은 'wsb'·'wsp'
+    animCat = (m[1] ?? m[2]).toLowerCase();
     for (const el of animBar.querySelectorAll('[data-i18n-cat]')) setCatText(el, el.dataset.i18nCat);
 }
 
@@ -569,7 +579,34 @@ function relabelAnimBar(path) {
 //   'Bullet'(R-PEN): 프레임 n에서 Bullet01~0n이 보임 (게임 데이터). 그래서 슬라이더 값을 프레임(탄 수 0~5)으로 씀. 게임이 남은 탄 수로 프레임을 정하는지는 추측
 // 양손(머뉴버)이면 모델마다 mixer를 따로 두고 같은 조작을 양쪽에 함께 적용
 let mixers = [];
+// 굴절 유리 깊이 검사용: 굴절 유리를 뺀 장면의 깊이 (renderRefractDepth). 굴절 유리가 있는 모델에서만 그림
+const refractDepth = { target: null, texture: { value: null }, meshes: [], size: new THREE.Vector2(), material: new THREE.MeshBasicMaterial({ colorWrite: false }) };
+function renderRefractDepth(camera) {
+    if (!refractDepth.meshes.length) return;
+    renderer.getDrawingBufferSize(refractDepth.size);
+    const { x: w, y: h } = refractDepth.size;
+    if (!refractDepth.target) {
+        refractDepth.target = new THREE.WebGLRenderTarget(w, h, { depthTexture: new THREE.DepthTexture(w, h) });
+        refractDepth.texture.value = refractDepth.target.depthTexture;
+    } else if (refractDepth.target.width !== w || refractDepth.target.height !== h) {
+        refractDepth.target.setSize(w, h);
+    }
+    for (const mesh of refractDepth.meshes) mesh.visible = false;
+    const background = scene.background;
+    scene.background = null;
+    scene.overrideMaterial = refractDepth.material;
+    const current = renderer.getRenderTarget();
+    renderer.setRenderTarget(refractDepth.target);
+    renderer.clear();
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(current);
+    scene.overrideMaterial = null;
+    scene.background = background;
+    for (const mesh of refractDepth.meshes) mesh.visible = true;
+}
 const uvProxies = []; // {proxy, material}: tex_mtx0 이동을 proxy.position으로 재생해서 매 프레임 텍스처에 반영
+const exprProxies = []; // {proxy, material, index}: 커스텀 식 머티리얼의 const_valueN 애니메이션을 proxy.position.x로 재생해서 매 프레임 uniform에 반영
+const s3Time = { value: 0 }; // 커스텀 식의 시간 (게임 fp_c7[20].w 자리. 초 단위로 봄, 추정). 애니메이션 일시정지 중에는 멈춤
 const animBar = document.getElementById('anim-bar');
 // 버튼을 누르면 반대쪽 클립을 한 번 재생하고 끝 자세를 유지. 첫 클립의 끝 자세로 시작하고, labels[상태]가 버튼 글자 (i18n.js 키)
 // prefix: 이 무기군 파일에만 적용 (롤러·붓·셸터는 같은 Open/Close 이름이라도 동작이 달라서 무기군마다 따로 둠)
@@ -626,8 +663,27 @@ function buildClips(gltf) {
         if (!obj.isMesh || materials.has(obj.material)) return;
         materials.add(obj.material);
         for (const [name, anim] of Object.entries(obj.material.userData.s3?.param_anims ?? {})) {
+            // emission_color: emission 기준 색이 emission_color인 머티리얼만 (emission_color_type 0. 1·2는 알베도·잉크 색이 기준이라 안 씀)
+            // 성분(바이트 오프셋 0·4·8)마다 따로 온 트랙을 색 트랙 하나로. 커브가 없는 성분은 정적 값 (예: 컬링 밤 히어로 Held_fsp는 r·g만)
+            const colorTracks = anim.tracks.filter((t) => t.param === 'emission_color');
+            if (colorTracks.length && !['1', '2'].includes(obj.material.userData.s3.options.emission_color_type ?? '0')) {
+                const base = obj.material.emissive.toArray();
+                const { times } = colorTracks[0];
+                const values = times.flatMap((_, i) => base.map((v, c) => colorTracks.find((t) => t.target === c * 4)?.values[i] ?? v));
+                clipFor(name).tracks.push(new THREE.ColorKeyframeTrack(`${obj.uuid}.material.emissive`, times, values));
+            }
             for (const track of anim.tracks) {
-                if (track.param === 'emission_intensity') {
+                if (track.param.startsWith('const_value') && obj.material.userData.exprC) {
+                    const index = Number(track.param.slice('const_value'.length));
+                    let entry = exprProxies.find((e) => e.material === obj.material && e.index === index);
+                    if (!entry) {
+                        entry = { proxy: new THREE.Object3D(), material: obj.material, index };
+                        entry.proxy.position.x = obj.material.userData.exprC.value[index]; // 멈추면 mixer가 정적 값으로 되돌림
+                        gltf.scene.add(entry.proxy);
+                        exprProxies.push(entry);
+                    }
+                    clipFor(name).tracks.push(new THREE.NumberKeyframeTrack(`${entry.proxy.uuid}.position[x]`, track.times, track.values));
+                } else if (track.param === 'emission_intensity') {
                     clipFor(name).tracks.push(new THREE.NumberKeyframeTrack(`${obj.uuid}.material.emissiveIntensity`, track.times, track.values));
                 } else if (track.param in UV_CHANNELS && track.target in UV_TARGETS) {
                     const channel = UV_CHANNELS[track.param];
@@ -651,8 +707,11 @@ function setupAnimations(gltfs, path) {
     hideAnimControls();
     mixers = gltfs.map((gltf) => new THREE.AnimationMixer(gltf.scene));
     const clipSets = gltfs.map(buildClips);
-    for (const gltf of gltfs) {
-        gltf.scene.traverse((obj) => { if (obj.isMesh && obj.material.userData.paintMap?.value) inkToggle.parentElement.hidden = false; }); // 잉크 칠 영역이 있는 모델
+    // 잉크 칠 영역이 있는 모델. 서브·스페셜은 빼고 (라인 마커는 칠 영역이 Tcl 영역과 거의 겹쳐서 켜고 꺼도 달라 보이지 않음. 칠 자체는 그대로 함)
+    if (path.includes('/Wmn_')) {
+        for (const gltf of gltfs) {
+            gltf.scene.traverse((obj) => { if (obj.isMesh && obj.material.userData.paintMap?.value) inkToggle.parentElement.hidden = false; });
+        }
     }
     for (const sw of SWITCHES) {
         if ((sw.prefix && !path.includes(sw.prefix)) || (sw.when && !sw.when()) || !sw.clips.every((name) => clipSets[0].has(name))) continue;
@@ -692,7 +751,8 @@ function setupAnimations(gltfs, path) {
         sw.button.hidden = false;
     }
     // 와이퍼 클립('Shot', 'Wmn_Saber_Light_Charge' 등)은 이름이 겹쳐도 아래 범용 조작에 넣지 않음. 와이퍼 조작은 setupSaber (무기군별 별개)
-    const generic = !path.includes('Wmn_Saber_');
+    // 서브·스페셜도 빼고 setupSubSpecial이 따로 맡음 ('Shot'·'Warning' 등 이름이 겹쳐도 메인 무기 버튼·글자와 섞지 않음)
+    const generic = path.includes('/Wmn_') && !path.includes('Wmn_Saber_');
     for (const toggle of LOOP_TOGGLES) {
         toggle.actions = clipSets.flatMap((clips, i) => [...clips.values()].filter((c) => generic && toggle.match(c.name, c)).map((c) => {
             if (toggle.seamless) c.duration = seamlessDuration(c);
@@ -767,6 +827,7 @@ for (const toggle of LOOP_TOGGLES) {
 // tex_mtx 이동 → 그 머티리얼에서 같은 UV를 쓰는 텍스처 offset. UV0이면 Tcl/2cl용 uniform도, tex_mtx1이면 Resource 맵용 uniform도
 function applyUvProxies() {
     for (const { proxy, material, channel } of uvProxies) setUvTransform(material, channel, proxy.position.x, proxy.position.y);
+    for (const { proxy, material, index } of exprProxies) material.userData.exprC.value[index] = proxy.position.x;
 }
 // tex_mtx0은 UV0, tex_mtx1은 UV1 맵에 (UV_CHANNELS). tx, ty: 이동 성분 (정적 값 또는 애니메이션 값)
 // 정적 SRT(material.userData.s3.tex_srt, 지금은 와이퍼만. build_glb TEX_SRT_PREFIXES)가 있으면 게임 식: UV' = M·(u, v, 1). g3d Maya 모드 회전 0이면
@@ -835,20 +896,56 @@ function resetView() {
     controls.update();
 }
 document.getElementById('view-reset').addEventListener('click', resetView); // 지금 모델 크기에 맞춘 기본 시점으로
+// 그림자 범위를 모델 크기에 맞춤. 무기는 ±1 안이라 예전 값 그대로(반지름 1 이하), 그보다 큰 모델(스플래터컬러 스크린 막 ±11 등)만 넓힘.
+// 범위가 ±1로 고정이면 큰 모델은 가운데 2×2 사각형 안에서만 그림자를 받아서 사각형 그림자가 보였음
+function fitShadows(radius) {
+    const r = Math.max(1, radius);
+    for (const { light, distance } of shadowLights) {
+        const cam = light.shadow.camera;
+        cam.left = cam.bottom = -r;
+        cam.right = cam.top = r;
+        light.position.setLength(distance + 2 * (r - 1)); // 방향은 그대로, 모델 밖으로 물림
+        cam.far = Math.max(10, light.position.length() + 2 * r);
+        cam.updateProjectionMatrix();
+    }
+}
+// 크기 비교용 캐릭터 (옷 없는 몸 + 헤어 + 눈썹). 무기와 같은 게임 단위 그대로, 무기 옆(-Z, 화면 왼쪽)에 카메라를 보게 세움
+// 무기를 바꿔도 남아 있고 currentModel에는 안 넣음 (clearModel이 지우지 않게). modelPivot 아래라 회전·셰이더 모드는 같이 받음
+const character = { uvProxies: [], object: null, box: null, seq: 0, body: null, player: null, mixer: null, holding: false, animName: null, animSeq: 0, animIndex: null, clips: new Map() };
+const heldParts = []; // 캐릭터 손에 붙인 무기 (currentModel 대신. clearModel이 떼고 해제)
+const CHARACTER_GAP = 0.1; // 무기와 캐릭터 사이 간격. 보기 위한 값 (게임 근거 없음)
+function placeCharacter(weaponBox) {
+    const { object, box } = character;
+    const wc = weaponBox.getCenter(new THREE.Vector3());
+    const cc = box.getCenter(new THREE.Vector3());
+    object.position.set(wc.x - cc.x, wc.y - cc.y, weaponBox.min.z - CHARACTER_GAP - box.max.z); // 세로는 가운데끼리 맞춤 (보기 위한 배치)
+    return box.clone().translate(object.position);
+}
 function placeModel(object, depthPad = 0) {
     currentModel = object;
     const box = new THREE.Box3().setFromObject(object);
-    const size = box.getSize(new THREE.Vector3());
+    if (character.object) box.union(placeCharacter(box));
     const center = box.getCenter(new THREE.Vector3());
     object.position.sub(center);
-
+    character.object?.position.sub(center);
+    frameView(box.translate(center.negate()), depthPad);
+    modelPivot.add(object); // 회전은 이전 모델 것을 유지
+}
+// 무기를 든 캐릭터: 캐릭터(바인드 자세 상자)를 가운데에 두고 시점을 맞춤
+function placeHeld() {
+    const center = character.box.getCenter(new THREE.Vector3());
+    character.object.position.copy(center).negate();
+    frameView(character.box.clone().translate(character.object.position));
+}
+function frameView(box, depthPad = 0) {
+    const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
+    fitShadows(size.length() / 2);
     const fov = camera.fov * (Math.PI / 180);
     const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)); // 모델이 화면에 꽉 차는 거리
     defaultView.set(-2 * cameraZ - depthPad, cameraZ / 2, 0); // 정측면(-X)에서 약간 위
     if (!viewPlaced) resetView();
     viewPlaced = true;
-    modelPivot.add(object); // 회전은 이전 모델 것을 유지
 }
 
 // glb 머티리얼: 텍스처 역할(셰이더 샘플러 이름), render state, 파라미터는 변환 때 material.userData.s3에 기록됨 (tools/build_glb.py)
@@ -883,6 +980,75 @@ async function setupS3Material(material, parser) {
     // build_glb가 이 조합(enable_shading False, 알베도 텍스처 없음, emission_color_type 1)에만 albedo_color를 넣음
     const unlit = params?.albedo_color !== undefined;
     if (unlit) material.color.fromArray(params.albedo_color);
+    // 화면 굴절 유리 (decompile: 포이즌 미스트 M_Bottle, program 13667). 알베도 텍스처 없이 albedo_color, roughness 파라미터를 씀. 출력 alpha는 1
+    // 확산색 = mix(sqrt(albedo_color) × 화면 색, 조명 받은 확산색, Opa 맵). 화면 색은 UV를 −(뷰 법선 xy) × refract_intensity만큼 밀어 mip = roughness로 읽음
+    // - 화면 색: three.js transmission 패스(불투명 물체만 먼저 그린 화면)를 빌려 씀. 계산은 transmission_fragment를 게임 식으로 바꿈
+    //   three.js는 단색 배경(scene.background가 Color)을 이 화면에 안 그리고 흰색 alpha 0.5로 지움 → 물체가 없는 곳(alpha < 1)은 배경색으로 채움
+    // - 깊이 검사: 민 자리의 화면 깊이가 유리보다 앞이면(유리 앞의 물체) 밀지 않은 UV를 씀 (게임 식). 안 하면 유리 앞 물체가 유리에 번져 보임
+    //   (예: 포이즌 미스트 보라색 띠 아래 보라색 그림자). three.js transmission 패스는 깊이 텍스처를 안 줘서 renderRefractDepth가 따로 그림
+    // - y 방향 부호는 게임 상수(fp_c3[15].z)를 1로 보고 정함 (추정)
+    // 스플래터컬러 스크린 막 M_Wall: 커스텀 식(pixel_expression0) 머티리얼 (decompile: program 11866). build_glb가 식의 상수(const_value0~9, const_vector0~3)를 넣음
+    // - 비눗막 패턴: Resource1(M_WallPattern_Resi) 값 r을 UV + Resource0(M_WallPattern_Nrm) xy × sin(시간 × c1) × c0 × c2만큼 흔든 자리에서 읽음.
+    //   r ≤ c8이면 discard (Opa 맵 alpha test가 아님). 펼치기 Open은 c8이 −0.79 → 0.31, 접기 Close는 0.31 → 0.78 (막이 녹듯 사라짐)
+    // - 색: 잉크 색을 HSV로 바꿔 r ≤ c5: HSV(h, s, 0.5), ≤ c6: HSV(h + v1.x, s + v1.y, 0.3), ≤ c7: HSV(h + v2.x, s + v2.y, v + v2.z), 그 외: v3 쪽.
+    //   0.3 자리는 게임 상수 fp_c1[0].x × (…) + 0.3이라 계수를 0.3으로 봄 (추정). 셰이더는 r·g·b마다 Resource1의 x·y·z로 고르는데, 1채널(BC4) 텍스처라 같은 값으로 봄 (추정)
+    // - emission = 이 색 × emission_intensity, manual fresnel F0 = manual_fresnel × 잉크 색 (fresnel_multi_color 2)
+    // - 정점 물결: 위치 y += w × c4, z += w × c9 (스키닝 전). w = Resource2(M_WallWave_Resi)(UV0 + fract(시간 × 0.17)) × 정점 컬러 z
+    //   정점 컬러는 이 모델만 변환에 넣음 (build_glb VERTEX_COLOR_MODELS). 알베도에는 안 곱함 (vertexColors는 꺼 둠)
+    // - 법선: (노멀 맵 법선 + Resource0을 흔든 UV에서 읽어 같은 접선 공간으로 만든 법선) × 0.73. 게임은 정규화 안 하지만 뷰어는 정규화함:
+    //   길이가 1보다 길면 three.js가 N·H를 1로 잘라서 GGX 하이라이트(roughness 0)가 넓게 하얗게 번짐 (게임은 안 잘라서 오히려 줄어듦)
+    // - 미구현: fabric·aniso 반사, metal flake (flake rare 세기 0.01)
+    const expr = material.userData.s3.expr?.id === 'chimney_wall' ? material.userData.s3.expr : null;
+    if (expr) {
+        material.alphaMap = null; // _op0 자리에 패턴이 들어 있지만 alpha가 아니라 위 discard로 씀
+        material.alphaTest = 0;
+        material.emissive.set(1, 1, 1);
+    }
+    if (expr) material.userData.exprC = { value: [...expr.const_value] }; // userData 값은 전부 {value} (disposeModel이 훑음)
+    material.userData.exprPat = { value: expr ? await load('_re0') : null };
+    material.userData.exprResi = { value: expr ? await load('_re1') : null };
+    material.userData.exprWave = { value: expr ? await load('_re2') : null };
+    const V3 = (v) => `vec3(${v.map((x) => Number(x).toFixed(5)).join(', ')})`;
+    const exprCode = !expr ? '' : `vec2 s3Pat = texture2D(s3ExprPat, vS3Uv).xy * 2.0 - 1.0;
+vec2 s3Wobble = s3Pat * sin(s3Time * s3ExprC[1]) * s3ExprC[0];
+float s3R = texture2D(s3ExprResi, vS3Uv + s3Wobble * s3ExprC[2]).r;
+if (s3R <= s3ExprC[8]) discard;
+vec3 s3Hsv = s3RgbToHsv(teamColor);
+vec3 s3ExprCol = s3R <= s3ExprC[5] ? s3HsvToRgb(s3Hsv.x, s3Hsv.y, 0.5) : s3HsvToRgb(s3Hsv.x + ${Number(expr.const_vector[1][0]).toFixed(5)}, s3Hsv.y + ${Number(expr.const_vector[1][1]).toFixed(5)}, 0.3);
+s3ExprCol = s3R <= s3ExprC[6] ? s3ExprCol : s3HsvToRgb(s3Hsv.x + ${Number(expr.const_vector[2][0]).toFixed(5)}, s3Hsv.y + ${Number(expr.const_vector[2][1]).toFixed(5)}, s3Hsv.z + ${Number(expr.const_vector[2][2]).toFixed(5)});
+s3ExprCol = s3R <= s3ExprC[7] ? s3ExprCol : s3HsvToRgb(s3Hsv.x + ${Number(expr.const_vector[3][0]).toFixed(5)}, s3Hsv.y + ${Number(expr.const_vector[3][1]).toFixed(5)}, s3Hsv.z + ${Number(expr.const_vector[3][2]).toFixed(5)});
+diffuseColor.rgb = s3ExprCol;
+`;
+    const exprGlsl = !expr ? '' : `uniform sampler2D s3ExprPat;
+uniform sampler2D s3ExprResi;
+uniform float s3ExprC[10];
+uniform float s3Time;
+vec3 s3RgbToHsv(vec3 c) {
+    vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    vec4 p = c.b <= c.g ? vec4(c.g, c.b, K.xy) : vec4(c.b, c.g, K.wz);
+    vec4 q = p.x <= c.r ? vec4(c.r, p.yzx) : vec4(p.xyw, c.r);
+    float d = q.x - min(q.w, q.y);
+    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + 1e-10)), d / (q.x + 1e-10), q.x);
+}
+vec3 s3HsvToRgb(float h, float s, float v) {
+    vec3 k = clamp(abs(fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+    return v * (1.0 + s * (k - 1.0));
+}
+`;
+    const refract = material.userData.s3.refract;
+    if (refract) {
+        material.color.fromArray(refract.albedo_color);
+        material.roughness = refract.roughness;
+        material.transmission = 1;
+    }
+    const refractCode = !refract ? '#include <transmission_fragment>' : `material.transmissionAlpha = 1.0;
+vec4 s3Clip = projectionMatrix * viewMatrix * vec4(vWorldPosition, 1.0);
+vec2 s3ScreenUv = s3Clip.xy / s3Clip.w * 0.5 + 0.5;
+vec2 s3RefractUv = s3ScreenUv - normal.xy * ${Number(refract.refract_intensity).toFixed(5)};
+if (texture2D(s3RefractDepth, s3RefractUv).r <= gl_FragCoord.z) s3RefractUv = s3ScreenUv;
+vec4 s3SceneRaw = textureLod(transmissionSamplerMap, s3RefractUv, ${Number(refract.roughness).toFixed(5)});
+vec3 s3Scene = mix(s3Background, s3SceneRaw.rgb, saturate(s3SceneRaw.a * 2.0 - 1.0));
+totalDiffuse = mix(sqrt(${`vec3(${refract.albedo_color.map((v) => Number(v).toFixed(5)).join(', ')})`}) * s3Scene, totalDiffuse, diffuseColor.a);`;
     // calc_color0: replace_color 2면 emission 맵 값 자리에 피연산자 A, B, C를 조합한 값을 씀
     // decompile 확인: 소이 튜버 M_Body (계산 5, A 3, B 9, C 50) = Emm × 잉크 색 + Resource0, 스퀵 클린 M_Bottle (계산 2, A 3, B 10) = Emm × Resource1
     //   블래스터 쇼트 M_Body (계산 1, A 50, B 3) = 잉크 색 × Emm + 잉크 색
@@ -908,23 +1074,46 @@ async function setupS3Material(material, parser) {
     material.userData.resUvOffset = { value: new THREE.Vector2() }; // tex_mtx1 이동·크기 (setUvTransform)
     material.userData.resUvScale = { value: new THREE.Vector2(1, 1) };
     const tclMap = await load('_su0');
-    // 알베도 텍스처를 끈 머티리얼만 전체가 잉크 색 (예: 스플랫 슈터 병). team_color_map_type 3이어도 알베도가 있으면 알베도 그대로 (예: 새싹/단풍 슈터 캡·스티커)
+    // 캐릭터 피부 (decompile: 몸 M_Body program 13751, 얼굴 M_Face 2600): calc_color0 계산 9 (A × B × C), A 0 알베도, B 100 const_color0, C 9 Resource0(MAi 맵, UV0)
+    //   → 확산색 = 알베도 × const_color0 × MAi. calc_color2 (replace 4, 계산 2, A 1 Rgh 맵, B 102 const_color2) → roughness = Rgh 맵 × const_color2.x
+    //   피부색 프리셋(Color_Skin)이 const_color0~2를 바꿈 (setSkinPreset). calc_color1(투과색 × const_color1)은 투과광을 안 넣는 뷰어에선 안 씀
+    const opt = (k, d) => options[k] ?? d;
+    const skin = options.enable_calc_color0 === 'True' && opt('blitz_calc_color0_replace_color', '0') === '0' && options.blitz_calc_color0_calc_type === '9'
+        && opt('blitz_calc_color0_A', '0') === '0' && options.blitz_calc_color0_B === '100' && options.blitz_calc_color0_C === '9' && params?.const_color0 !== undefined;
+    material.userData.skinMap = { value: skin ? await load('_re0') : null };
+    material.userData.constColor0 = { value: new THREE.Vector3(...(skin ? params.const_color0 : [1, 1, 1])) };
+    material.userData.skinRoughness = options.enable_calc_color2 === 'True' && options.blitz_calc_color2_replace_color === '4' && options.blitz_calc_color2_calc_type === '2'
+        && options.blitz_calc_color2_A === '1' && options.blitz_calc_color2_B === '102' && params?.const_color2 !== undefined;
+    // 헤어 막 색 (decompile: 오징어 헤어 Har_SQD000_F M_TeamColor program 6735): calc_color0 replace 7 = 막 색에 곱하는 자리, 계산 5 (A × C + B),
+    //   A 9 Resource0(Thc 맵, UV0), B 58 my_team_color_hue_complement, C 5 = 1 → 막 색 = (Thc + 보색) × under_film_color
+    //   막 세기 = sat(NoV^film_transmission_power × film_transmission_rate) × (1 − 두께 맵 _re2) (restex_id_thickness_map 4)
+    //   보색: 게임이 넣는 값이라 decompile로는 모름. HoianViewer(HoianNXRender.WriteTeamColorMaterialUniforms)는 잉크 색의 색상을 반 바퀴 돌린 색 = (최대 + 최소) − 잉크 색
+    const hairFilm = options.enable_calc_color0 === 'True' && options.blitz_calc_color0_replace_color === '7' && options.blitz_calc_color0_calc_type === '5'
+        && options.blitz_calc_color0_A === '9' && options.blitz_calc_color0_B === '58' && options.blitz_calc_color0_C === '5'
+        && options.enable_thickness_map === 'True' && options.restex_id_thickness_map === '4';
+    material.userData.filmResMap = { value: hairFilm ? await load('_re0') : null };
+    material.userData.thickMap = { value: hairFilm ? await load('_re2') : null };
+    // 알베도 텍스처를 끈 머티리얼만 전체가 잉크 색 (예: 스플랫 슈터 병)
     const fullTeamColor = options.team_color_map_type === '3' && options.enable_albedo_tex === 'False';
+    // team_color_map_type 3 + 알베도 텍스처: mix(알베도, 잉크 색, sat(team_color_blend)) (decompile 3개 프로그램, build_glb 참고).
+    // 스플래시 밤 비닐은 1이라 전부 잉크 색, 새싹/단풍 슈터 캡은 0이라 알베도 그대로
+    const teamBlend = params?.team_color_blend;
     // 잉크가 묻는 표면 (롤러 헤드, 붓 털 등): 2cl 맵의 흰 영역이 잉크로 덮여서 잉크 색이 됨
     // decompile: 칠 양 = clamp(2cl + 칠 세기 − 1). 칠 세기 자리의 bfres 값은 롤러와 노틸러스 모두 0이라 게임 코드가 채우는 것으로 보임.
     // 그래서 무기 자체에 늘 잉크가 묻어 있는 enable_private_paint_thickness 머티리얼만 칠함 (노틸러스 몸통은 2cl이 전부 흰색이지만 이 옵션이 없고, 게임에서도 칠해져 있지 않음)
     const paintMap = options.blitz_paint_type === '4' && options.enable_private_paint_thickness === 'True' ? await load('_cp0') : null;
     material.userData.tclMap = { value: tclMap }; // userData에 둬야 disposeModel이 해제함
+    if (material.userData.skinRoughness && material.roughnessMap) material.roughness = params.const_color2[0];
     material.userData.paintMap = { value: paintMap };
     material.userData.uvOffset = { value: new THREE.Vector2() }; // tex_mtx0 이동·크기 (Tcl/2cl 맵용. 나머지 맵은 texture.offset·repeat, setUvTransform)
     material.userData.uvScale = { value: new THREE.Vector2(1, 1) };
-    const tcl = tclMap ? 'texture2D(tclMap, vS3Uv).r' : fullTeamColor ? '1.0' : '0.0';
+    const tcl = tclMap ? 'texture2D(tclMap, vS3Uv).r' : fullTeamColor ? '1.0' : teamBlend !== undefined ? Math.min(Math.max(teamBlend, 0), 1).toFixed(4) : '0.0';
     const paint = paintMap ? 'texture2D(paintMap, vS3Uv).r * inkPaint' : '0.0';
-    const emissionBase = { '1': 's3Albedo', '2': 'teamColor' }[emissionType] ?? 'vec3(1.0)';
+    const emissionBase = expr ? 's3ExprCol' : { '1': 's3Albedo', '2': 'teamColor' }[emissionType] ?? 'vec3(1.0)';
     // manual fresnel: 반사율(F0)을 metalness 대신 manual_fresnel × manual_fresnel_color로 고정 (예: 볼드 마커 유리는 1.0이라 거울처럼 반사)
     // three.js에서 실제 F0로 쓰이는 값은 specularColorBlended (specularColor를 metalness로 섞은 값)
-    const f0 = options.enable_manual_fresnel === 'True'
-        ? `vec3(${params.manual_fresnel_color.map((c) => (c * params.manual_fresnel).toFixed(4)).join(', ')})` : null;
+    const f0 = options.enable_manual_fresnel !== 'True' ? null : expr ? `(teamColor * ${params.manual_fresnel.toFixed(4)})`
+        : `vec3(${params.manual_fresnel_color.map((c) => (c * params.manual_fresnel).toFixed(4)).join(', ')})`;
     // transfilm / edge light / transmission (decompile: 스퍼터리 OWL M_Twins_Short_Cstm02, 프라임 슈터 계열 M_Body)
     // - transfilm: film = sat(NoV^film_transmission_power × film_transmission_rate × Fxm). 확산색 = mix(albedo × (1 − metal), 막 색, film),
     //   SH를 읽는 법선 = mix(normal, 정점 법선, film). 정면일수록 막 색이 보임 (스퍼터리 OWL의 갈색)
@@ -960,7 +1149,10 @@ async function setupS3Material(material, parser) {
     const filmCode = !film && !edgeLight ? '' : `float s3NoV = dot(normal, normalize(vViewPosition));
 float s3Fm = ${fm};
 ${film ? `float s3Film = saturate(pow(saturate(max(s3NoV, 1e-3)), ${S3_FIXED(params.film_transmission_power)}) * ${S3_FIXED(params.film_transmission_rate)} * s3Fm);
-material.diffuseContribution = mix(material.diffuseContribution, ${S3_VEC3(params.under_film_color)}${underFilm}, s3Film);
+${hairFilm ? `s3Film *= 1.0 - texture2D(thickMap, vS3Uv).r;
+vec3 s3Comp = vec3(max(max(teamColor.r, teamColor.g), teamColor.b) + min(min(teamColor.r, teamColor.g), teamColor.b)) - teamColor;
+material.diffuseContribution = mix(material.diffuseContribution, ${S3_VEC3(params.under_film_color)} * (texture2D(filmResMap, vS3Uv).rgb + s3Comp), s3Film);`
+        : `material.diffuseContribution = mix(material.diffuseContribution, ${S3_VEC3(params.under_film_color)}${underFilm}, s3Film);`}
 s3AmbNormal = mix(normal, nonPerturbedNormal, s3Film);
 s3AmbNormalSet = true;` : 'float s3Film = 0.0;'}
 ${edgeLight ? `if (s3EnvOn > 0.5) material.diffuseContribution += max(s3ShIrradiance(s3EnvRot * transformDirectionByInverseViewMatrix(-normalize(vViewPosition), viewMatrix)), 0.0)
@@ -986,10 +1178,14 @@ void s3Direct(const in IncidentLight directLight, const in vec3 geometryPosition
     reflectedLight.directDiffuse += s3TransColor * raw * saturate(1.0 - (1.0 - shadow) * 0.7) * edge * scatter * s3TransRate;
 }
 `;
-    material.customProgramCacheKey = () => [tcl, paint, emissionBase, f0, calcExpr, resMap && resUv, normalize, unlit, f0Code, filmCode, transCode, transGlsl].join('|'); // 기본 키(onBeforeCompile 소스)는 머티리얼마다 같아서 셰이더가 섞일 수 있음
+    material.customProgramCacheKey = () => [tcl, paint, emissionBase, f0, calcExpr, resMap && resUv, normalize, unlit, f0Code, filmCode, transCode, transGlsl, refractCode, exprCode, skin].join('|'); // 기본 키(onBeforeCompile 소스)는 머티리얼마다 같아서 셰이더가 섞일 수 있음
     material.onBeforeCompile = (shader) => {
         shader.uniforms.teamColor = { value: teamColor };
         shader.uniforms.tclMap = material.userData.tclMap;
+        shader.uniforms.skinMap = material.userData.skinMap;
+        shader.uniforms.constColor0 = material.userData.constColor0;
+        shader.uniforms.filmResMap = material.userData.filmResMap;
+        shader.uniforms.thickMap = material.userData.thickMap;
         shader.uniforms.paintMap = material.userData.paintMap;
         shader.uniforms.inkPaint = inkPaint;
         shader.uniforms.s3UvOffset = material.userData.uvOffset;
@@ -1000,9 +1196,23 @@ void s3Direct(const in IncidentLight directLight, const in vec3 geometryPosition
         shader.uniforms.trmMap = material.userData.trmMap;
         shader.uniforms.fmMap = material.userData.fmMap;
         shader.uniforms.transMaskMap = material.userData.transMaskMap;
+        shader.uniforms.s3Background = { value: BACKGROUND_COLOR };
+        shader.uniforms.s3RefractDepth = refractDepth.texture;
+        shader.uniforms.s3ExprPat = material.userData.exprPat;
+        shader.uniforms.s3ExprResi = material.userData.exprResi;
+        shader.uniforms.s3ExprWave = material.userData.exprWave;
+        if (material.userData.exprC) shader.uniforms.s3ExprC = material.userData.exprC;
+        shader.uniforms.s3Time = s3Time;
         // uv1은 three.js가 두 번째 UV를 쓰는 맵이 있을 때만 선언함
         shader.vertexShader = '#ifndef USE_UV1\nattribute vec2 uv1;\n#endif\nuniform vec2 s3UvOffset;\nuniform vec2 s3ResUvOffset;\nuniform vec2 s3UvScale;\nuniform vec2 s3ResUvScale;\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.vertexShader.replace(
             '#include <uv_vertex>', `#include <uv_vertex>\nvS3Uv = uv * s3UvScale + s3UvOffset;\nvS3ResUv = ${resMap ? resUv : 'uv'} * s3ResUvScale + s3ResUvOffset;`);
+        if (expr) {
+            shader.vertexShader = '#if !defined(USE_COLOR) && !defined(USE_COLOR_ALPHA)\nattribute vec4 color;\n#endif\nuniform sampler2D s3ExprWave;\nuniform float s3ExprC[10];\nuniform float s3Time;\n'
+                + shader.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+float s3Wave = texture2D(s3ExprWave, uv + fract(s3Time * 0.17)).r * color.z;
+transformed.y += s3Wave * s3ExprC[4];
+transformed.z += s3Wave * s3ExprC[9];`);
+        }
         // 게임은 emission 맵 값을 계산 결과로 바꾼 뒤 기준 색 × emission_intensity를 곱함. three.js의 emissivemap_fragment가 emission 맵을 곱하는 자리를 바꿈
         const emissive = calcExpr
             ? `vec3 s3Emm = texture2D(emissiveMap, vEmissiveMapUv).rgb;\nvec3 s3Res = texture2D(resMap, vS3ResUv).rgb;\n`
@@ -1013,15 +1223,19 @@ void s3Direct(const in IncidentLight directLight, const in vec3 geometryPosition
         const normalizeCode = normalize ? 'float s3I = emissive.r;\nfloat s3K = clamp(length(s3Emm), 0.0, 1.0);\n'
             + 'vec3 s3N = outgoingLight * (1.0 + s3K * (s3I / max(dot(outgoingLight, vec3(0.298912, 0.586611, 0.114478)), 1e-8) - 1.0));\n'
             + 'outgoingLight = s3I > 1.0 ? s3N : mix(outgoingLight, s3N, s3I);\n' : '';
-        shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D paintMap;\nuniform sampler2D resMap;\nuniform sampler2D trmMap;\nuniform sampler2D fmMap;\nuniform sampler2D transMaskMap;\nuniform float inkPaint;\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.fragmentShader
+        shader.fragmentShader = 'uniform vec3 teamColor;\nuniform sampler2D tclMap;\nuniform sampler2D skinMap;\nuniform vec3 constColor0;\nuniform sampler2D filmResMap;\nuniform sampler2D thickMap;\nuniform sampler2D paintMap;\nuniform sampler2D resMap;\nuniform sampler2D trmMap;\nuniform sampler2D fmMap;\nuniform sampler2D transMaskMap;\nuniform vec3 s3Background;\nuniform sampler2D s3RefractDepth;\nuniform float inkPaint;\n' + exprGlsl + '\nvarying vec2 vS3Uv;\nvarying vec2 vS3ResUv;\n' + shader.fragmentShader
             .replace('#include <map_fragment>',
-                `#include <map_fragment>\nvec3 s3Albedo = diffuseColor.rgb;\ndiffuseColor.rgb = mix(diffuseColor.rgb, teamColor, max(${tcl}, ${paint}));\nvec3 s3AlbedoInk = diffuseColor.rgb;`)
+                `#include <map_fragment>\n${skin ? 'diffuseColor.rgb *= constColor0 * texture2D(skinMap, vS3Uv).r;\n' : ''}vec3 s3Albedo = diffuseColor.rgb;\ndiffuseColor.rgb = mix(diffuseColor.rgb, teamColor, max(${tcl}, ${paint}));\nvec3 s3AlbedoInk = diffuseColor.rgb;\n${exprCode}`)
             .replace('#include <lights_physical_pars_fragment>', `#include <lights_physical_pars_fragment>\n${transGlsl}`)
             .replace('#include <lights_fragment_begin>', trmMap ? THREE.ShaderChunk.lights_fragment_begin.replaceAll('RE_Direct( directLight,', 's3Direct( directLight,')
                 .replace(/(get(?:Directional|Point|Spot)LightInfo\([^;]*;)/g, '$1\ns3LightRaw = directLight.color;') : '#include <lights_fragment_begin>')
             .replace('#include <emissivemap_fragment>', emissive)
+            .replace('#include <transmission_fragment>', refractCode)
             .replace('#include <opaque_fragment>', `${unlit ? 'outgoingLight = diffuseColor.rgb + totalEmissiveRadiance;\n' : ''}${normalizeCode}#include <opaque_fragment>`)
-            .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>\n${f0Code}\n${filmCode}${transCode}`);
+            .replace('#include <lights_physical_fragment>', `#include <lights_physical_fragment>\n${f0Code}\n${filmCode}${transCode}`)
+            .replace('#include <normal_fragment_maps>', expr ? `#include <normal_fragment_maps>
+vec2 s3PatN = texture2D(s3ExprPat, vS3Uv + s3Wobble).xy * 2.0 - 1.0;
+normal = normalize(normal + normalize(tbn * vec3(s3PatN, sqrt(saturate(1.0 - dot(s3PatN, s3PatN))))));` : '#include <normal_fragment_maps>');
         addGameEnv(shader);
     };
     // 정적 tex_mtx (setUvTransform). 회전이 있는 값은 무기에 없어서(build_glb_audit 2.6) 식을 확인 안 함 → 적용 안 함
@@ -1038,14 +1252,183 @@ void s3Direct(const in IncidentLight directLight, const in vec3 geometryPosition
     material.needsUpdate = true;
 }
 
+// 서브·스페셜 애니메이션 (게임 클립, build_glb가 파일에 있는 것을 전부 넣음). 모델 파일마다 조작을 나열하고, 버튼·체크박스는 #ws-anims 안에 만듦
+// - key: 글자 키. 서브는 'wsb.*' (서브끼리 같이 씀. Warning(폭발 직전 부풀기)은 'wsb.warning' 하나), 스페셜은 'wsp.<무기>.*' (무기마다 따로, 서로 안 섞음)
+// - clips: 한 번 재생하고 끝 자세 유지 (버튼, 누르면 처음부터). loops: 같이 켜지는 반복 클립. loop: true면 clips가 반복 (체크박스)
+// - sequence: clips를 동시에가 아니라 순서대로 이어서 재생 (앞 클립이 끝나면 다음 클립)
+// - reset: 한 번 재생이 끝나고 WS_RESET_FRAMES(20f, 사용자 요청) 동안 끝 자세를 두었다가 처음 상태로 (폭발·소멸 버튼). 일시정지 중에는 안 셈
+// - initial: 반복은 처음부터 켬 (게임이 저절로 재생하는 '_auto'), 한 번 재생은 끝 자세로 시작 (스플래시 실드 Start 끝 ≈ 바인드 = 설치된 모습)
+// 본·보임을 움직이는 조작끼리는 하나만 켬: 같은 본을 다른 클립과 같이 걸면 three.js가 평균을 내서 게임 데이터에 없는 자세가 됨 (게임 AS가 어떻게 섞는지는 확인 못 함)
+// 발광만 바꾸는 조작은 따로 켜고 끔. 클립에 트랙이 없으면(뷰어가 안 쓰는 셰이더 파라미터만 있거나 모델에 없는 본) 조작을 안 만듦
+// 안 쓰는 클립: 컬링 밤 '*_auto'·토피도 'Wsb_Bomb_Tako'(모델에 없는 본), 크랩 탱크 'WalkForward'·'WalkBackward'(본 이름이 다른 옛 구성, 모델에는 ScaleJoint만 있음),
+//   디코이 캐넌 'Wait'(1프레임 자세, 사용자 요청으로 뺌), 울트라 착지 '*_L'(왼손 클립, 모델은 오른손), 0프레임 클립(크랩 탱크 Sphere, 울트라 샷 카트리지 보임/숨김)
+const WS_CURLING = [{ clips: ['Held', 'Held_fts'], loops: ['Held_fsp'], key: 'wsb.held' }, { clips: ['Wait'], loop: true, key: 'wsb.wait' },
+    { clips: ['Wide'], key: 'wsb.wide' }, { clips: ['Warning'], key: 'wsb.warning', reset: true }];
+const WS_ANIMS = {
+    Wsb_Bomb_Throw: [{ clips: ['Warning'], key: 'wsb.warning', reset: true }],
+    Wsb_Bomb_Throw_Msn: [{ clips: ['Warning'], key: 'wsb.warning', reset: true }],
+    Wsb_Bomb_Hold: [{ clips: ['Shake'], key: 'wsb.deploy' }, { clips: ['Warning', 'Warning_fsp'], key: 'wsb.warning', reset: true }],
+    Wsb_Bomb_Handy: [{ clips: ['Wsb_Bomb_Handy_auto'], loop: true, initial: true, key: 'wsb.auto' }],
+    Wsb_Bomb_Handy_Msn: [{ clips: ['Wsb_Bomb_Handy_Msn_auto'], loop: true, initial: true, key: 'wsb.auto' }],
+    Wsb_Sprinkler: [{ clips: ['Wsb_Sprinkler_auto'], loop: true, initial: true, key: 'wsb.auto' }],
+    Wsb_Shield: [{ clips: ['Start'], initial: true, key: 'wsb.deploy' }, { clips: ['Start_Sway'], key: 'wsb.sway' }, { clips: ['Active'], loop: true, key: 'wsb.active' }],
+    Wsb_Bomb_Piyo: [{ clips: ['Scale'], key: 'wsb.charge' }, { clips: ['Warning'], key: 'wsb.warning', reset: true }],
+    Wsb_Bomb_Curling: WS_CURLING,
+    Wsb_Bomb_Curling_Msn: WS_CURLING,
+    Wsb_Bomb_Curling_Rvl: WS_CURLING,
+    Wsb_Bomb_Robo: [{ clips: ['Sleep'], loop: true, key: 'wsb.sleep' }, { clips: ['Walk'], loop: true, key: 'wsb.walk' }, { clips: ['Jump'], key: 'wsb.jump' },
+        { clips: ['Warning'], key: 'wsb.warning', reset: true }],
+    Wsb_Flag: [{ clips: ['transform'], key: 'wsb.deploy' }, { clips: ['wait'], loop: true, key: 'wsb.wait' }, { clips: ['signal'], loop: true, key: 'wsb.signal' }],
+    Wsb_Bomb_Tako: [{ clips: ['Start'], key: 'wsb.detect' }, { clips: ['Fly'], loop: true, key: 'wsb.fly' }, { clips: ['Warning'], key: 'wsb.warning', reset: true },
+        { clips: ['Warning_Fly'], key: 'wsb.warningFly', reset: true }],
+    Wsp_UltraShot: [{ clips: ['Wait'], loop: true, key: 'wsp.ultraShot.wait' }, { clips: ['Shot'], key: 'wsp.ultraShot.shot' }],
+    Wsp_GreatBarrier: [{ clips: ['Activate'], key: 'wsp.greatBarrier.activate' }, { clips: ['Activate_Loop'], loop: true, key: 'wsp.greatBarrier.spin' },
+        { clips: ['signal'], loop: true, key: 'wsp.greatBarrier.signal' }],
+    Wsp_GreatBarrier_Drone: [{ clips: ['Activate_Drone'], loop: true, key: 'wsp.greatBarrierDrone.activate' }],
+    Wsp_ShockSonar: [{ clips: ['Attack'], key: 'wsp.shockSonar.attack' }],
+    Wsp_MicroLaserBit: [{ clips: ['PreAciton'], loop: true, key: 'wsp.microLaserBit.ready' }, { clips: ['Firing'], loop: true, key: 'wsp.microLaserBit.firing' }],
+    Wsp_SuperStamp: [{ clips: ['Smash'], key: 'wsp.superStamp.smash' }, { clips: ['Return'], key: 'wsp.superStamp.return' }],
+    Wsp_Chariot: [{ clips: ['TransformSphere'], key: 'wsp.chariot.toSphere' }, { clips: ['TransformCrab'], key: 'wsp.chariot.toCrab' },
+        { clips: ['Wait'], loop: true, key: 'wsp.chariot.wait' }, { clips: ['WalkF'], loop: true, key: 'wsp.chariot.walkF' },
+        { clips: ['WalkB'], loop: true, key: 'wsp.chariot.walkB' }, { clips: ['WalkL'], loop: true, key: 'wsp.chariot.walkL' },
+        { clips: ['WalkR'], loop: true, key: 'wsp.chariot.walkR' }, { clips: ['Turn'], loop: true, key: 'wsp.chariot.turn' },
+        { clips: ['ShootBullet'], loop: true, key: 'wsp.chariot.shootBullet' }, { clips: ['ShootCannonballUp'], key: 'wsp.chariot.cannonUp' },
+        { clips: ['ShootCannonballMdl'], key: 'wsp.chariot.cannonMid' }, { clips: ['ShootCannonballDwn'], key: 'wsp.chariot.cannonDown' },
+        { clips: ['ShootCannonball'], key: 'wsp.chariot.cannonRecoil' }, { clips: ['Caution'], loop: true, key: 'wsp.chariot.caution' }],
+    Wsp_SkewerTackle: [{ clips: ['Sp_Start_Skewer'], key: 'wsp.skewerTackle.start' }, { clips: ['Skewer_Invocation'], key: 'wsp.skewerTackle.explode', reset: true },
+        { clips: ['Skewer_Run'], loop: true, key: 'wsp.skewerTackle.run' }],
+    Wsp_TripleTornadoBeacon: [{ clips: ['Shake'], key: 'wsp.tripleTornadoBeacon.deploy' }],
+    Wsp_TripleTornado: [{ clips: ['Wsp_TripleTornado_Auto'], key: 'wsp.tripleTornado.fly' }],
+    Wsp_EnergyStand: [{ clips: ['Appear'], key: 'wsp.energyStand.appear' }, { clips: ['Throw'], loop: true, key: 'wsp.energyStand.throw' },
+        { clips: ['BreakSign'], key: 'wsp.energyStand.breakSign' }],
+    Wsp_FireworkPipe: [{ clips: ['WaitHold'], loop: true, key: 'wsp.fireworkPipe.waitHold' }, { clips: ['ThrowBomb_BothHandsShort'], key: 'wsp.fireworkPipe.throw' },
+        { clips: ['Appear'], key: 'wsp.fireworkPipe.deploy' }, { clips: ['Shot'], loop: true, key: 'wsp.fireworkPipe.shot' },
+        { clips: ['Shot_End'], key: 'wsp.fireworkPipe.shotEnd' }],
+    Wsp_FireworkBomb: [{ clips: ['Shake'], key: 'wsp.fireworkBomb.deploy' }, { clips: ['Warning'], key: 'wsp.fireworkBomb.warning', reset: true }],
+    // 준비 → 시작 → 내려찍기 → 끝을 한 버튼으로 이어서 (사용자 요청. 게임이 이 순서로 잇는지는 AS 확인 안 함)
+    Wsp_Pogo_R: [{ clips: ['Sp_PreStart_Pogo_R', 'Sp_Start_Pogo_R_St', 'Sp_Start_Pogo_R', 'Sp_Start_Pogo_R_Ed'], sequence: true, key: 'wsp.pogo.cast' }],
+    Wsp_Chimney: [{ clips: ['Activate'], loop: true, key: 'wsp.chimney.activate' }],
+    Wsp_ChimneyWall: [{ clips: ['Open'], initial: true, key: 'wsp.chimneyWall.cast' }, { clips: ['Close'], key: 'wsp.chimneyWall.vanish', reset: true },
+        { clips: ['Caution'], key: 'wsp.chimneyWall.caution' }],
+    Wsp_Shachihoko: [{ clips: ['wait'], loop: true, key: 'wsp.shachihoko.wait' }, { clips: ['Charge'], key: 'wsp.shachihoko.charge' }],
+};
+const wsBar = document.getElementById('ws-anims');
+animControls.push(wsBar);
+let wsControls = [];
+const WS_RESET_FRAMES = 20;
+function wsCheckResets() {
+    for (const control of wsControls) {
+        if (control.resetAt == null || s3Time.value < control.resetAt) continue;
+        control.resetAt = null;
+        for (const action of control.actions) action.stop(); // 멈추면 원래 상태로 돌아감
+    }
+}
+function setupSubSpecial(clipSets, path) {
+    wsBar.replaceChildren();
+    wsControls = [];
+    const entries = WS_ANIMS[path.match(/(Ws[bp]_\w+)\.glb$/)?.[1]];
+    if (!entries) return;
+    const [clips] = clipSets;
+    const [mixer] = mixers;
+    const stopOthers = (self) => {
+        for (const other of wsControls) {
+            if (other === self || !other.skeletal) continue;
+            for (const action of other.actions) action.stop(); // 멈추면 원래 자세로 돌아감
+            if (other.input) other.input.checked = false;
+        }
+    };
+    for (const entry of entries) {
+        const loops = entry.loop ? entry.clips : entry.loops ?? [];
+        const names = [...(entry.loop ? [] : entry.clips), ...loops].filter((name) => clips.get(name)?.tracks.length && clips.get(name).duration > 0);
+        if (!names.length) continue;
+        const actions = names.map((name) => {
+            const action = mixer.clipAction(clips.get(name));
+            const loop = loops.includes(name);
+            action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce);
+            action.clampWhenFinished = !loop; // 끝 자세 유지 (reset이면 잠시 뒤 원래 상태로, wsCheckResets)
+            return action;
+        });
+        const control = { actions, skeletal: names.some((name) => clips.get(name).tracks.some((t) => /\.(position|quaternion|scale|visible)$/.test(t.name))) };
+        const start = () => {
+            if (!mixers.includes(mixer)) return; // 다음 모델을 불러오는 중 (이 mixer는 이미 정리됨)
+            control.resetAt = null;
+            if (control.skeletal) stopOthers(control);
+            for (const action of entry.sequence ? actions.slice(1) : []) action.stop();
+            for (const action of entry.sequence ? actions.slice(0, 1) : actions) action.reset().play();
+            showFirstFrame();
+        };
+        if (entry.reset) {
+            mixer.addEventListener('finished', ({ action }) => {
+                if (actions.includes(action) && !actions.some((a) => a.isRunning())) control.resetAt = s3Time.value + WS_RESET_FRAMES / 60; // 클립이 여럿이면 다 끝난 뒤
+            });
+        }
+        if (entry.sequence) {
+            mixer.addEventListener('finished', ({ action }) => {
+                const next = actions[actions.indexOf(action) + 1];
+                if (!next) return;
+                next.reset().play();
+                action.stop();
+            });
+        }
+        if (entry.loop) {
+            const label = document.createElement('label');
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            const text = document.createElement('span');
+            setText(text, entry.key);
+            label.append(input, ' ', text);
+            input.addEventListener('change', () => {
+                if (!mixers.includes(mixer)) return;
+                if (input.checked) {
+                    start();
+                    return;
+                }
+                for (const action of actions) action.stop();
+                showFirstFrame();
+            });
+            control.input = input;
+            wsBar.append(label);
+            if (entry.initial) {
+                input.checked = true;
+                for (const action of actions) action.play();
+            }
+        } else {
+            const button = document.createElement('button');
+            setText(button, entry.key);
+            button.addEventListener('click', start);
+            wsBar.append(button);
+            if (entry.initial) {
+                for (const action of actions) {
+                    action.play();
+                    action.time = action.getClip().duration;
+                }
+            }
+        }
+        wsControls.push(control);
+    }
+    wsBar.hidden = !wsControls.length;
+}
+
 async function readGlb(path) {
     const gltf = await new GLTFLoader().loadAsync(path);
     const materials = new Set();
+    const physical = new Map(); // 화면 굴절 유리: three.js는 MeshPhysicalMaterial에만 transmission 화면 텍스처를 넘겨줌 (GLTFLoader는 Standard로 만듦)
     gltf.scene.traverse((child) => {
         if (!child.isMesh) return;
         child.castShadow = true;
         child.receiveShadow = true;
         if (child.userData.s3?.hidden) child.visible = false; // 게임에서 기본으로 숨겨진 부품 (붙은 본이 invisible)
+        if (child.material.userData.s3?.refract) {
+            if (!physical.has(child.material)) {
+                const phys = new THREE.MeshPhysicalMaterial();
+                THREE.MeshStandardMaterial.prototype.copy.call(phys, child.material);
+                phys.defines.PHYSICAL = '';
+                physical.set(child.material, phys);
+                child.material.dispose();
+            }
+            child.material = physical.get(child.material);
+            refractDepth.meshes.push(child);
+        }
         materials.add(child.material);
         // GLTFLoader는 COLOR_0이 있으면 vertex color를 albedo에 곱하지만, 게임 셰이더는 vertex color를 입력으로 받지 않음
         // (decompile: 스플랫 머뉴버 M_Body, L3 릴 건 D 스티커). 머뉴버는 값이 거의 0이라 무기가 검게 나왔음
@@ -1114,14 +1497,15 @@ async function loadGlb(path, twoHanded = false) {
     const seq = ++loadSeq;
     lastGlb = { path, twoHanded };
     clearModel();
-    const hand = twoHanded ? handSelect.value : 'R';
+    const held = character.object !== null && character.holding && holdAnim(path) !== undefined;
+    const hand = twoHanded ? (held ? 'both' : handSelect.value) : 'R'; // 들 때는 게임처럼 양손
     const paths = { R: [path], L: [path.replace(/\.glb$/, '_L.glb')], both: [path, path.replace(/\.glb$/, '_L.glb')] }[hand];
     const shelter = path.includes('Wmn_Shelter_');
     try {
         const gltfs = await Promise.all(paths.map(readGlb));
         if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
         const canEject = shelter && gltfs[0].animations.some((clip) => clip.name === 'Fly');
-        shelterEject = canEject && ejected ? ejectSelect.value : null;
+        shelterEject = canEject && ejected && !held ? ejectSelect.value : null;
         if (shelterEject === 'both') {
             gltfs.push(await readGlb(path)); // 우산막용으로 한 번 더 (첫 번째는 손잡이)
             if (seq !== loadSeq) return;
@@ -1129,22 +1513,29 @@ async function loadGlb(path, twoHanded = false) {
         const clipSets = setupAnimations(gltfs, path);
         setupStringer(clipSets, path);
         setupSaber(gltfs, clipSets, path);
+        setupSubSpecial(clipSets, path);
         // 일시정지/재생은 재생할 애니메이션이 있는 모델만 (머뉴버는 양손 선택 때문에 animBar가 떠도 애니메이션이 없음)
-        pauseButton.hidden = !clipSets.some((clips) => [...clips.values()].some((clip) => clip.tracks.length));
         const level = path.match(HERO_LEVEL)?.[2];
         heroLevel.parentElement.hidden = level === undefined;
         if (level !== undefined) {
             heroLevel.value = level;
             heroLevelText.textContent = `Lv${level}`;
         }
-        handSelect.parentElement.hidden = !twoHanded;
-        staggerToggle.parentElement.hidden = !twoHanded || gltfs.length === 1;
-        ejectToggle.hidden = !canEject;
+        handSelect.parentElement.hidden = !twoHanded || held; // 들 때는 늘 양손
+        staggerToggle.parentElement.hidden = !twoHanded || gltfs.length === 1 || held;
+        ejectToggle.hidden = !canEject || held; // 손에 든 동안은 사출 없음
         setText(ejectToggle, ejected ? 'shelter.recover' : 'shelter.eject');
         updateEjectToggle();
         ejectSelect.parentElement.hidden = !shelterEject;
         relabelAnimBar(path);
         updateAnimBar();
+        holdButton.hidden = !character.object || holdAnim(path) === undefined;
+        setText(holdButton, held ? 'chr.release' : 'chr.hold');
+        playCharacterAnim(held ? holdAnim(path) : 'Wait');
+        if (held) {
+            holdWeapons(gltfs.map((g) => g.scene), path, clipSets);
+            return;
+        }
         if (shelterEject) {
             const [handle, canopy] = { canopy: [null, 0], handle: [0, null], both: [0, 1] }[shelterEject].map((i) => i === null ? null : gltfs[i]);
             if (handle) handle.scene.traverse((obj) => { if (obj.isMesh && shelterPart(obj) !== 'Gun') obj.visible = false; });
@@ -1204,6 +1595,357 @@ shelterSwitch.button.addEventListener('click', updateEjectToggle);
 ejectToggle.addEventListener('click', () => {
     ejected = !ejected;
     loadGlb(lastGlb.path, lastGlb.twoHanded);
+});
+
+// 캐릭터: Player00/01 오징어 여/남, Player02/03 문어 여/남. 헤어·눈썹은 기본(000) 모델
+// 헤어·눈썹 모델의 루트 본 Head_Root는 몸의 Head 본 자리에 붙는 본 (바인드 자세의 회전이 Head와 같음) → Head_Root가 Head에 겹치게 옮겨서 몸에 붙임
+const CHARACTERS = {
+    inkF: ['Player00', 'Har_SQD000_F', 'Eyb_SQD000_F'],
+    inkM: ['Player01', 'Har_SQD000_M', 'Eyb_SQD000_M'],
+    octF: ['Player02', 'Har_OCT000_F', 'Eyb_OCT000_F'],
+    octM: ['Player03', 'Har_OCT000_M', 'Eyb_OCT000_M'],
+};
+// 장비: 게임 RowId로 둠 (나중에 고르기 기능을 넣을 수 있게). 지금은 이 세 가지만 불러옴
+// 모델 파일: 상의·하의는 <RowId>_F / _M (여 / 남, 오징어·문어 공통), 신발은 <RowId> 하나 (HoianViewer PlayerScene.SetClothes·SetBottom·SetShoes.
+//   상의는 게임 표에 성별 없는 모델이 있으면 그것을 먼저 쓰지만, 지금 장비는 성별 모델만 있음)
+const characterGear = { clothes: 'Clt_TES000', bottom: 'Btm_000', shoes: 'Shs_FST000' };
+const gearFiles = (sex) => [`${characterGear.clothes}_${sex}`, `${characterGear.bottom}_${sex}`, characterGear.shoes];
+let gearTable = null; // glb/gear.json (tools/build_gear_masks.py): {종류: {RowId: {mask: {F, M, V1}}}}
+const characterSelect = document.getElementById('character-select');
+async function loadCharacter(key) {
+    const seq = ++character.seq;
+    const sex = key.endsWith('F') ? 'F' : 'M';
+    const [gltfs, gearGltfs] = key === 'none' ? [[], []] : await Promise.all([
+        Promise.all(CHARACTERS[key].map((name) => readGlb(`glb/${name}.glb`))),
+        Promise.all(gearFiles(sex).map((name) => readGlb(`glb/${name}.glb`))),
+    ]);
+    gearTable ??= await (await fetch('glb/gear.json')).json();
+    if (seq !== character.seq) {
+        for (const g of [...gltfs, ...gearGltfs]) disposeModel(g.scene);
+        return;
+    }
+    if (character.object) {
+        character.mixer.stopAllAction();
+        character.mixer.uncacheRoot(character.body);
+        modelPivot.remove(character.object);
+        disposeModel(character.object);
+        character.object = character.body = character.mixer = character.animName = null;
+        character.uvProxies = [];
+    }
+    if (gltfs.length) {
+        const [body, ...parts] = gltfs.map((g) => g.scene);
+        body.updateMatrixWorld(true);
+        const head = body.getObjectByName('Head');
+        for (const part of parts) {
+            part.updateMatrixWorld(true);
+            // Head 본 아래에 붙여 애니메이션을 따라가게 함: Head 본 기준 위치 = Head_Root 행렬의 역
+            part.getObjectByName('Head_Root').matrixWorld.clone().invert().decompose(part.position, part.quaternion, part.scale);
+            head.add(part);
+        }
+        await wearGear(body, gearGltfs.map((g) => g.scene), sex);
+        if (seq !== character.seq) return;
+        const group = new THREE.Group().add(body);
+        body.rotation.y = -Math.PI / 2; // 앞(+Z)이 카메라(-X) 쪽을 보게
+        character.box = new THREE.Box3().setFromObject(group);
+        character.object = group;
+        character.body = body;
+        character.player = CHARACTERS[key][0];
+        character.mixer = new THREE.AnimationMixer(body);
+        character.uvProxies = [];
+        body.traverse((o) => {
+            if (!o.isMesh || o.material.name !== 'M_Eye') return;
+            let entry = character.uvProxies.find((e) => e.name === o.material.name);
+            if (!entry) {
+                entry = { name: o.material.name, proxy: new THREE.Object3D(), materials: [] };
+                entry.proxy.name = `s3uv_${o.material.name}`;
+                character.uvProxies.push(entry);
+            }
+            if (!entry.materials.includes(o.material)) entry.materials.push(o.material);
+        });
+        for (const { proxy } of character.uvProxies) body.add(proxy);
+        modelPivot.add(group);
+        await setupCharacterPresets(gltfs);
+        if (seq !== character.seq) return;
+    }
+    skinItem.hidden = eyeItem.hidden = !character.object;
+    viewPlaced = false; // 캐릭터를 바꾸면 둘 다 보이게 시점을 다시 맞춤
+    await loadGlb(lastGlb.path, lastGlb.twoHanded);
+}
+characterSelect.addEventListener('change', () => loadCharacter(characterSelect.value));
+
+// 장비 입히기 (HoianViewer PartModel.ResolveWelds·AlphaMaskSystem. 게임 decompile 아님)
+// - 장비 본은 전부 몸 본과 이름이 같음 → 장비 스킨 메시의 본을 몸의 같은 이름 본으로 바꿔 묶음 (역바인드 행렬은 장비 것 그대로)
+// - 신발은 왼발 모델 하나: 오른발은 왼발 메시·역바인드 그대로, 본 행렬만 _R 몸 본의 행렬에서 회전 3×3의 부호를 뒤집은 것
+//   (HoianViewer PartModel.NegateMatrix, 주석에 게임 ShoesCallback이라고 적음). 바인드 자세에서 −R(오른 다리)이 왼 다리 방향을 반사한 것이 됨.
+//   반사라서 삼각형 감기 방향을 뒤집고, 노멀맵 bitangent 방향이 맞게 탄젠트 w도 뒤집음. 신발 셰이더 옵션 enable_mirroring의 효과는 미확인이라 안 씀
+// - 몸 가리기: 장비마다 정해진 마스크(RSDB AlphaMaskF/M)를 몸 Opa 맵과 최솟값으로 합쳐 M_Body alpha test(0.5)로 장비 속 피부를 지움
+// 몸 본 이름 → {본, 몸 스킨의 역바인드}. 이름이 처음 나온 노드 (Head 아래 헤어의 Spine_3 같은 같은 이름 본보다 몸 본이 먼저 나옴)
+function bodyBones(body) {
+    const map = new Map();
+    body.traverse((o) => { if (!map.has(o.name)) map.set(o.name, { bone: o, inverse: null }); });
+    body.traverse((o) => {
+        if (o.isSkinnedMesh && o.material.name === 'M_Body') o.skeleton.bones.forEach((bone, i) => { map.get(bone.name).inverse = o.skeleton.boneInverses[i]; });
+    });
+    return map;
+}
+const swapLR = (name) => name.replace(/_L$/, '_R');
+function mirrorGeometry(geometry) {
+    const g = geometry.clone();
+    const tangent = g.getAttribute('tangent');
+    if (tangent) for (let i = 0; i < tangent.count; i++) tangent.setW(i, -tangent.getW(i));
+    const index = g.getIndex();
+    for (let i = 0; i < index.count; i += 3) {
+        const b = index.getX(i + 1);
+        index.setX(i + 1, index.getX(i + 2));
+        index.setX(i + 2, b);
+    }
+    return g;
+}
+async function wearGear(body, [clothes, bottom, shoes], sex) {
+    const bones = bodyBones(body);
+    for (const scene of [clothes, bottom, shoes]) {
+        const meshes = [];
+        scene.traverse((o) => { if (o.isSkinnedMesh) meshes.push(o); });
+        for (const mesh of meshes) mesh.bind(new THREE.Skeleton(mesh.skeleton.bones.map((b) => bones.get(b.name).bone), mesh.skeleton.boneInverses), mesh.bindMatrix);
+        // 오른발
+        if (scene === shoes) {
+            for (const mesh of meshes) {
+                const right = new THREE.SkinnedMesh(mirrorGeometry(mesh.geometry), mesh.material);
+                right.castShadow = right.receiveShadow = true;
+                // 장면 밖의 대리 본: 행렬은 스키닝 직전에 _R 몸 본에서 계산 (Skeleton.update가 bone.matrixWorld만 읽음)
+                const targets = mesh.skeleton.bones.map((b) => bones.get(swapLR(b.name)).bone);
+                const proxies = targets.map(() => new THREE.Bone());
+                const skeleton = new THREE.Skeleton(proxies, mesh.skeleton.boneInverses);
+                const update = skeleton.update.bind(skeleton);
+                skeleton.update = () => {
+                    proxies.forEach((p, i) => {
+                        const e = p.matrixWorld.copy(targets[i].matrixWorld).elements;
+                        for (const k of [0, 1, 2, 4, 5, 6, 8, 9, 10]) e[k] = -e[k];
+                    });
+                    update();
+                };
+                right.bind(skeleton, mesh.bindMatrix);
+                scene.add(right);
+            }
+        }
+        body.add(scene);
+    }
+    // 몸 가리기 마스크
+    const names = [['clothes', characterGear.clothes], ['bottom', characterGear.bottom], ['shoes', characterGear.shoes]]
+        .map(([kind, id]) => gearTable[kind][id]?.mask[sex]).filter(Boolean);
+    const images = await Promise.all(names.map((n) => new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = reject;
+        img.src = `glb/mask/${n}.png`;
+    })));
+    const materials = new Set();
+    body.traverse((o) => { if (o.isMesh && o.material.name === 'M_Body' && o.material.alphaMap) materials.add(o.material); });
+    for (const material of materials) {
+        const src = material.alphaMap;
+        const { width, height } = src.image;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const g = canvas.getContext('2d', { willReadFrequently: true });
+        g.imageSmoothingEnabled = false; // HoianViewer MinBlend: 마스크를 몸 맵 크기로 최근접 샘플
+        g.drawImage(src.image, 0, 0);
+        const out = g.getImageData(0, 0, width, height);
+        for (const img of images) {
+            g.clearRect(0, 0, width, height);
+            g.drawImage(img, 0, 0, width, height);
+            const m = g.getImageData(0, 0, width, height).data;
+            for (let i = 0; i < m.length; i++) out.data[i] = Math.min(out.data[i], m[i]);
+        }
+        g.putImageData(out, 0, 0);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.flipY = src.flipY;
+        tex.wrapS = src.wrapS;
+        tex.wrapT = src.wrapT;
+        tex.channel = src.channel;
+        material.alphaMap = tex;
+        src.dispose();
+    }
+}
+
+// 캐릭터 애니메이션: 안 들면 Wait, 들면 Shop_Wait_<무기군> (게임 상점 대기 동작). tools/build_player_anims.py가 만든 애니메이션 glb를 필요할 때 받음
+// 무기 붙이기 (HoianViewer PlayerScene.SetWeapon. 게임 decompile 아님): 무기 Root 본을 손 본에 겹침. 오른손 Weapon_R, 스트링거는 Weapon_L,
+// 양손 무기(머뉴버)의 왼손 모델은 Weapon_L에 X축 180° 돌려서 (_L 모델이 미리 대칭된 경우와 같은 처리. 뷰어 _L은 오른손 모델을 X 대칭한 것)
+// 무기 Root가 바인드 자세 기준이라, 무기 애니메이션이 Root를 움직이면 그만큼 어긋날 수 있음
+// 들 때 무기 상태: 무기 파일에 캐릭터와 같은 이름(Shop_Wait_<무기군>)의 애니메이션이 있으면 그것을 반복 재생 (스트링거만 있음: 활대 Reel이 Y축 −17° 등.
+//   차지 버튼은 이 자세와 섞이므로 들고 있는 동안 숨김). 셸터는 접힌 상태 (사용자 요청. HoianViewer ApplyWeaponCarryPose도 접은 우산).
+//   롤러·붓 등 나머지는 버튼 상태 그대로 (사용자 요청)
+const HOLD_CODES = { Blaster: 'Blst', Brush: 'Brsh', Charger: 'Chrg', Maneuver: 'Mnvr', Roller: 'Rllr', Saber: 'Sber', Shelter: 'Shlt', Shooter: 'Shtr', Slosher: 'Slsh', Spinner: 'Spnr', Stringer: 'Strn' };
+// 스페셜: 게임 WeaponSp* 액터의 ModelInfo가 쓰는 모델 → 캐릭터 대기 동작 WaitHold<코드>. 붙이는 본은 메인과 같게 Weapon_R로 둠 (게임 데이터에 없음, 추정)
+// 게 탱크(Chariot)는 캐릭터가 올라타는 탈것이라 손에 붙이지 않음. 스플래터컬러 스크린·디코이 캐넌은 캐릭터 쪽 대기 동작이 없음.
+// 멀티 미사일·연어알캐넌은 들고 있는 모델이 없음 (액터 ModelInfo 없음)
+const SPECIAL_HOLDS = { JetPackLauncher: 'WaitHoldAir_JetPack', Blower: 'WaitHold_Blower', Shachihoko: 'WaitHold_GHoko', RainCloud: 'WaitHold_RainCloud',
+    SuperStamp: 'WaitHold_SuperStamp', TripleTornadoBeacon: 'WaitHold_TripleTornado', UltraShot: 'WaitHold_UltraShot' };
+const holdAnim = (path) => {
+    const code = HOLD_CODES[path.match(/Wmn_([A-Za-z]+)_/)?.[1]];
+    return code ? `Shop_Wait_${code}` : SPECIAL_HOLDS[path.match(/Wsp_(\w+)\.glb$/)?.[1]];
+};
+const holdButton = document.getElementById('hold-toggle');
+holdButton.addEventListener('click', () => {
+    character.holding = !character.holding;
+    viewPlaced = false; // 옆에 세우기 ↔ 들기는 화면 구성이 달라서 시점을 다시 맞춤
+    loadGlb(lastGlb.path, lastGlb.twoHanded);
+});
+async function playCharacterAnim(name) {
+    if (!character.mixer || character.animName === name) return;
+    character.animName = name;
+    const seq = ++character.animSeq;
+    character.animIndex ??= await (await fetch('glb/anim/index.json')).json();
+    const file = character.animIndex[character.player][name];
+    if (!character.clips.has(file)) character.clips.set(file, characterClip(await new GLTFLoader().loadAsync(`glb/anim/${file}`)));
+    if (seq !== character.animSeq || !character.mixer) return;
+    character.mixer.stopAllAction();
+    character.mixer.clipAction(character.clips.get(file)).play();
+    character.mixer.update(0); // 일시정지 중이어도 첫 프레임 자세로
+    applyCharacterUv();
+}
+// 애니메이션 glb의 셰이더 파라미터 커브(extras.s3.param_anims, tools/build_player_anims.py): 지금은 M_Eye tex_mtx0 이동 = 눈동자 이동뿐
+// 트랙은 머티리얼 이름별 proxy(character.uvProxies)의 position에 걸고 매 프레임 applyCharacterUv가 텍스처 오프셋으로 옮김
+// 캐릭터마다 몸 glb가 달라서 proxy 이름(s3uv_<머티리얼>)으로 트랙을 묶음 (클립은 캐릭터끼리 공유)
+function characterClip(gltf) {
+    const clip = gltf.animations[0];
+    for (const [material, tracks] of Object.entries(gltf.parser.json.animations[0].extras?.s3?.param_anims ?? {})) {
+        for (const t of tracks) {
+            if (t.param === 'tex_mtx0' && t.target in UV_TARGETS) clip.tracks.push(new THREE.NumberKeyframeTrack(`s3uv_${material}.position[${UV_TARGETS[t.target]}]`, t.times, t.values));
+        }
+    }
+    return clip;
+}
+// tex_mtx0 이동 (tx, ty) → UV0 맵 오프셋. 게임 식(g3d Maya, 크기 1·회전 0): u' = u − tx, v' = v + ty (setUvTransform의 정적 SRT 식과 같음)
+function applyCharacterUv() {
+    for (const { proxy, materials } of character.uvProxies) {
+        for (const material of materials) {
+            for (const key of ['map', 'normalMap', 'emissiveMap']) if (material[key]?.channel === 0) material[key].offset.set(-proxy.position.x, proxy.position.y);
+            material.userData.uvOffset.value.set(-proxy.position.x, proxy.position.y);
+        }
+    }
+}
+function holdWeapons(scenes, path, clipSets) {
+    clipSets.forEach((clips, i) => {
+        const shop = clips.get(holdAnim(path));
+        if (!shop) return;
+        mixers[i].stopAllAction();
+        mixers[i].clipAction(shop).play();
+        stringerState.hidden = stringerFire.hidden = true;
+        updateAnimBar();
+    });
+    if (path.includes('Wmn_Shelter_')) {
+        // 접기 애니메이션이 있으면 접은 끝 자세, 없으면(베어표) 펼친 우산 셰이프를 숨기고 접힌 우산 셰이프를 보임
+        if (!shelterSwitch.button.hidden) playSwitch(shelterSwitch, 1, true);
+        else for (const scene of scenes) scene.traverse((o) => { if (o.isMesh && shelterPart(o)) o.visible = shelterPart(o) !== 'Umbrella_Open'; });
+    }
+    scenes.forEach((scene, i) => {
+        const bone = character.body.getObjectByName(i === 1 || path.includes('Wmn_Stringer_') ? 'Weapon_L' : 'Weapon_R');
+        scene.updateMatrixWorld(true);
+        const m = (scene.getObjectByName('Root') ?? scene).matrixWorld.clone().invert(); // Root 본이 없으면(먹구름) 모델 원점
+        if (i === 1) m.premultiply(new THREE.Matrix4().makeRotationX(Math.PI));
+        m.decompose(scene.position, scene.quaternion, scene.scale);
+        bone.add(scene);
+        heldParts.push(scene);
+    });
+    placeHeld();
+}
+
+// 피부·눈 색 프리셋: 게임 Color_Skin(셰이더 파라미터, 9프레임)·Color_Eye(M_Eye 알베도 텍스처 패턴, 21프레임) 애니메이션의 프레임 하나를 고정 적용
+// (HoianViewer PlayerScene.ApplySkinTone·ApplyEyeColor와 같은 방식). build_glb가 material.extras.s3.presets에 프레임별 값·텍스처를 넣음
+// - 피부: const_color0(확산색에 곱함)과 const_color2(roughness)를 바꿈. 같은 애니메이션의 transmission_rate·edge_transmission_power·scattering_color·
+//   const_color1은 투과광을 안 넣는 뷰어(06_roadmap 6.3)에선 쓸 데가 없어서 안 바꿈
+// - 견본 색은 보기용: 얼굴 알베도 위쪽(이마) 평균 × const_color0 (MAi 맵은 안 곱함). 눈 견본은 텍스처 그림 그대로
+// 고른 번호는 캐릭터를 바꿔도 유지. 피부는 처음엔 모델 기본값(bfres 값이라 프리셋 프레임과 조금 다름)
+const charPreset = { skin: null, eye: 0, skinMats: [], eyeMats: [], skinDefault: '' };
+const skinItem = document.getElementById('skin-item');
+const eyeItem = document.getElementById('eye-item');
+const skinButton = document.getElementById('skin-button');
+const eyeButton = document.getElementById('eye-button');
+const skinPalette = document.getElementById('skin-palette');
+const eyePalette = document.getElementById('eye-palette');
+function meanTopColor(image) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const g = c.getContext('2d');
+    g.drawImage(image, 0, 0, image.width, image.height * 0.2, 0, 0, 32, 32); // 얼굴 알베도 위쪽 20%는 피부만 있음
+    const d = g.getImageData(0, 0, 32, 32).data;
+    const sum = [0, 0, 0];
+    for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k++) sum[k] += d[i + k];
+    return new THREE.Color().setRGB(...sum.map((v) => v / (d.length / 4) / 255), THREE.SRGBColorSpace);
+}
+function textureThumb(image) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 56;
+    c.getContext('2d').drawImage(image, image.width / 4, image.height / 4, image.width / 2, image.height / 2, 0, 0, 56, 56); // 가운데 절반 (홍채)
+    return `center / cover url(${c.toDataURL()})`;
+}
+function fillPalette(palette, swatches, onPick) {
+    palette.replaceChildren(...swatches.map((background, i) => {
+        const b = document.createElement('button');
+        b.className = 'preset-swatch';
+        b.style.background = background;
+        b.addEventListener('click', () => {
+            onPick(i);
+            palette.hidden = true;
+        });
+        return b;
+    }));
+}
+function markPalette(palette, index) {
+    [...palette.children].forEach((b, i) => b.classList.toggle('active', i === index));
+}
+function setSkinPreset(index) {
+    charPreset.skin = index;
+    for (const m of charPreset.skinMats) {
+        const { params, presets } = m.userData.s3;
+        m.userData.constColor0.value.set(...(index === null ? params.const_color0 : presets.skin.const_color0[index]));
+        if (m.userData.skinRoughness && m.roughnessMap) m.roughness = (index === null ? params.const_color2 : presets.skin.const_color2[index])[0];
+    }
+    markPalette(skinPalette, index);
+    skinButton.style.background = index === null ? charPreset.skinDefault : skinPalette.children[index].style.background;
+}
+async function setEyePreset(index) {
+    charPreset.eye = index;
+    for (const { material, parser } of charPreset.eyeMats) {
+        const tex = await parser.getDependency('texture', material.userData.s3.presets.eye[index].index);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        material.map = tex;
+    }
+    markPalette(eyePalette, index);
+    eyeButton.style.background = eyePalette.children[index].style.background;
+}
+async function setupCharacterPresets(gltfs) {
+    charPreset.skinMats = [];
+    charPreset.eyeMats = [];
+    for (const { scene, parser } of gltfs) {
+        scene.traverse((o) => {
+            if (!o.isMesh) return;
+            const presets = o.material.userData.s3?.presets;
+            if (presets?.skin && !charPreset.skinMats.includes(o.material)) charPreset.skinMats.push(o.material);
+            if (presets?.eye && !charPreset.eyeMats.some((e) => e.material === o.material)) charPreset.eyeMats.push({ material: o.material, parser });
+        });
+    }
+    // 견본은 얼굴 머티리얼 기준 (몸·얼굴 프레임 값이 같음)
+    const face = charPreset.skinMats.find((m) => m.name === 'M_Face') ?? charPreset.skinMats[0];
+    const base = meanTopColor(face.map.image);
+    const swatch = (cc) => `#${base.clone().multiply(new THREE.Color(...cc)).getHexString()}`; // Color는 linear로 곱하고 getHexString이 sRGB로 바꿈
+    charPreset.skinDefault = swatch(face.userData.s3.params.const_color0);
+    fillPalette(skinPalette, face.userData.s3.presets.skin.const_color0.map(swatch), setSkinPreset);
+    const eye = charPreset.eyeMats[0];
+    const eyeTextures = await Promise.all(eye.material.userData.s3.presets.eye.map((e) => eye.parser.getDependency('texture', e.index)));
+    fillPalette(eyePalette, eyeTextures.map((t) => textureThumb(t.image)), setEyePreset);
+    setSkinPreset(charPreset.skin);
+    await setEyePreset(charPreset.eye);
+}
+for (const [button, palette, other] of [[skinButton, skinPalette, eyePalette], [eyeButton, eyePalette, skinPalette]]) {
+    button.addEventListener('click', () => {
+        palette.hidden = !palette.hidden;
+        other.hidden = true;
+    });
+}
+document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest('#skin-item, #eye-item')) skinPalette.hidden = eyePalette.hidden = true;
 });
 
 // 스트링거: 기본(Default) / 가로 차지(ChargeWidth) / 세로 차지(Charge) 라디오와 발사(Shoot) 버튼. 다른 무기군 버튼과 로직을 공유하지 않음
@@ -1887,6 +2629,7 @@ function renderToon() {
 }
 
 function renderFrame() {
+    renderRefractDepth(activeCamera);
     if (lineMode) {
         renderLine();
         return;
@@ -1930,7 +2673,7 @@ let animPaused = false;
 const pauseButton = document.getElementById('anim-pause');
 pauseButton.addEventListener('click', () => {
     animPaused = !animPaused;
-    setCatText(pauseButton, animPaused ? 'play' : 'pause');
+    setText(pauseButton, animPaused ? 'anim.play' : 'anim.pause');
 });
 
 // 저장 (PNG·GIF·WebP, 화면은 export.js): 지금 셰이더·투영 그대로, 캔버스 크기로, 배경은 투명하게, 회전 기즈모는 빼고 그림
@@ -2029,8 +2772,14 @@ function animate(timestamp) {
         modelPivot.quaternion.premultiply(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * speedSlider.valueAsNumber * dt));
         showRotation();
     }
+    if (character.mixer && !animPaused) {
+        character.mixer.update(dt);
+        applyCharacterUv();
+    }
     if (mixers.length && !animPaused) {
+        s3Time.value += dt;
         for (const m of mixers) m.update(dt);
+        wsCheckResets();
         applyUvProxies();
     }
     controls.update(); // 컨트롤러 업데이트
@@ -2297,6 +3046,51 @@ const weaponData = [
             {file: 'Heavy', img: 'Path_Wst_Saber_Heavy_00.png'}, // 케이스는 따로 된 Case 모델 대신 본 모델의 Case 부품을 켜고 끔 (사용자 요청, setupSaber)
             {file: 'Heavy_Cstm01', img: 'Path_Wst_Saber_Heavy_01.png'},
             {file: 'Coop', img: 'Path_Wst_Saber_Bear.png'},
+        ] },
+    // 서브·스페셜: 모델 파일은 '<prefix>_<file>' (무기군 이름이 안 들어감). 어느 서브·스페셜인지는 게임 Actor pack이 쓰는 모델로 확인
+    { id: 'Sub', prefix: 'Wsb', img: 'IconTypeWpn_11.png',
+        items: [
+            {file: 'Bomb_Throw', img: 'Dummy.png'},
+            {file: 'Bomb_Throw_Msn', img: 'Dummy.png'},
+            {file: 'Bomb_Hold', img: 'Dummy.png'},
+            {file: 'Bomb_Handy', img: 'Dummy.png'},
+            {file: 'Bomb_Handy_Msn', img: 'Dummy.png'},
+            {file: 'Sprinkler', img: 'Dummy.png'},
+            {file: 'Shield', img: 'Dummy.png'},
+            {file: 'Bomb_Piyo', img: 'Dummy.png'},
+            {file: 'Bomb_Curling', img: 'Dummy.png'},
+            {file: 'Bomb_Curling_Msn', img: 'Dummy.png'},
+            {file: 'Bomb_Curling_Rvl', img: 'Dummy.png'},
+            {file: 'Bomb_Robo', img: 'Dummy.png'},
+            {file: 'Flag', img: 'Dummy.png'},
+            {file: 'MarkingBall', img: 'Dummy.png'},
+            {file: 'DevilBall', img: 'Dummy.png'},
+            {file: 'LineMarker', img: 'Dummy.png'},
+            {file: 'Bomb_Tako', img: 'Dummy.png'},
+        ] },
+    { id: 'Special', prefix: 'Wsp', img: 'IconTypeWpn_12.png',
+        items: [
+            {file: 'UltraShot', img: 'Dummy.png'},
+            {file: 'GreatBarrier', img: 'Dummy.png'},
+            {file: 'GreatBarrier_Drone', img: 'Dummy.png'},
+            {file: 'Missile', img: 'Dummy.png'},
+            {file: 'RainCloud', img: 'Dummy.png'},
+            {file: 'ShockSonar', img: 'Dummy.png'},
+            {file: 'Blower', img: 'Dummy.png'},
+            {file: 'MicroLaserBit', img: 'Dummy.png'},
+            {file: 'JetPackLauncher', img: 'Dummy.png'},
+            {file: 'SuperStamp', img: 'Dummy.png'},
+            {file: 'Chariot', img: 'Dummy.png'},
+            {file: 'SkewerTackle', img: 'Dummy.png'},
+            {file: 'TripleTornadoBeacon', img: 'Dummy.png'},
+            {file: 'TripleTornado', img: 'Dummy.png'},
+            {file: 'EnergyStand', img: 'Dummy.png'},
+            {file: 'FireworkPipe', img: 'Dummy.png'},
+            {file: 'FireworkBomb', img: 'Dummy.png'},
+            {file: 'Pogo_R', img: 'Dummy.png'},
+            {file: 'Chimney', img: 'Dummy.png'},
+            {file: 'ChimneyWall', img: 'Dummy.png'},
+            {file: 'Shachihoko', img: 'Path_Wsp_Shachihoko.png'},
         ] }
 ];
 
@@ -2306,7 +3100,10 @@ const categoryBar = document.getElementById('category-bar');
 
 // 무기 이미지: img/weapon_flat/의 item.img. 아직 못 찾은 무기는 'Dummy.png' (weaponData에서 img를 바꾸면 됨)
 let currentCat = null;
+// 서브·스페셜은 작업 중이라 로컬에서 열 때만 보임 (GitHub Pages 같은 배포 주소에서는 카테고리 버튼을 안 만듦)
+const LOCAL = ['localhost', '127.0.0.1', '[::1]', ''].includes(location.hostname);
 weaponData.forEach(cat => {
+    if (!LOCAL && (cat.prefix === 'Wsb' || cat.prefix === 'Wsp')) return;
     const btn = document.createElement('div');
     btn.className = 'cat-btn';
     btn.style.backgroundImage = `url(img/wpntypes/${cat.img})`;
@@ -2330,7 +3127,7 @@ weaponData.forEach(cat => {
             label.textContent = weaponName(`${cat.id}_${item.file}`);
             li.append(img, label);
             li.dataset.file = item.file;
-            const name = `Wmn_${cat.id}_${item.file}`;
+            const name = cat.prefix ? `${cat.prefix}_${item.file}` : `Wmn_${cat.id}_${item.file}`;
             li.onclick = () => {
                 exportName = englishWeaponName(`${cat.id}_${item.file}`) ?? name; // 저장 파일 이름은 언어와 상관없이 영어 무기 이름 (없으면 모델 파일 이름)
                 loadGlb(`glb/${name}.glb`, cat.id === 'Maneuver');
