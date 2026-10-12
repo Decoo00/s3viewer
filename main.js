@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { editor, cropFrame, savePng, safeName, openSequenceEditor } from './export.js';
 import { t, setText, categoryName, weaponName, englishWeaponName, onLangChange, mountLangPicker } from './i18n.js';
 
@@ -332,57 +333,85 @@ lightAngle.addEventListener('input', () => {
 
 
 
-// 3. 카메라는 이동/확대만 담당하고, 회전은 모델 쪽에서 처리 (아래 modelPivot)
+// 3. 카메라: 시점 이동 모드에서 왼쪽 드래그로 궤도 회전, 그 외에는 이동/확대만. 모델 회전은 축 회전 기즈모·자동 회전·숫자 입력 (아래 modelPivot)
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; // 부드러운 회전 감도
-controls.enableRotate = false;
+controls.enableRotate = true; // 시점 이동 모드(기본)에서만 켬 (setRotMode)
 
 // 모델 중심을 회전축으로 쓰기 위한 부모 그룹 (원점에 고정)
 const modelPivot = new THREE.Group();
 scene.add(modelPivot);
-
-// 드래그 방향을 카메라 기준 축으로 바꿔 모델을 회전 → 각도 제한 없음
-const ROTATE_SPEED = 0.01; // 1px당 라디안
-const activePointers = new Set();
-let lastX = 0, lastY = 0;
-renderer.domElement.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || gizmo.enabled) return; // 축 회전 모드에서는 기즈모가 처리
-    activePointers.add(e.pointerId);
-    lastX = e.clientX;
-    lastY = e.clientY;
-});
-renderer.domElement.addEventListener('pointermove', (e) => {
-    if (activePointers.size !== 1 || !activePointers.has(e.pointerId)) return; // 두 손가락은 확대/이동용
-    const dx = e.clientX - lastX, dy = e.clientY - lastY;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
-    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-    modelPivot.quaternion
-        .premultiply(new THREE.Quaternion().setFromAxisAngle(camUp, dx * ROTATE_SPEED))
-        .premultiply(new THREE.Quaternion().setFromAxisAngle(camRight, dy * ROTATE_SPEED));
-    showRotation();
-});
-for (const type of ['pointerup', 'pointercancel']) {
-    renderer.domElement.addEventListener(type, (e) => activePointers.delete(e.pointerId));
+// 캐릭터·무기를 따로 돌리고 옮기기 위한 묶음 (사용자 요청): modelPivot > <대상>Auto(자동 배치 위치) > <대상>User(사용자 회전·이동) > 모델
+// 무기는 Auto 원점이 무기 상자 가운데라 무기 가운데를 축으로 돌고, 캐릭터는 몸 원점(발밑 가운데)을 축으로 돎. User 값은 모델을 바꿔도 유지
+const weaponAuto = new THREE.Group();
+const weaponUser = new THREE.Group();
+const characterAuto = new THREE.Group();
+const characterUser = new THREE.Group();
+modelPivot.add(weaponAuto.add(weaponUser), characterAuto.add(characterUser));
+const TARGETS = { all: modelPivot, character: characterUser, weapon: weaponUser };
+let target = 'all'; // 회전 패널의 조작 대상
+let rotMode = 'view'; // 회전 패널 모드: 'view' 시점 이동, 'axis' 축 회전, 'move' 이동 (setRotMode)
+const rotTarget = () => TARGETS[target];
+// 월드 기준 회전 q를 대상에 적용 (대상의 부모가 돌아 있어도 화면 기준으로 돌게)
+const parentQuat = new THREE.Quaternion();
+function rotateTargetWorld(q) {
+    const obj = rotTarget();
+    obj.parent.getWorldQuaternion(parentQuat);
+    obj.quaternion.premultiply(parentQuat.clone().invert().multiply(q).multiply(parentQuat));
 }
 
-// 회전값 직접 입력 UI (월드 X/Y/Z축, Euler XYZ 순서, 단위: 도)
+// X·Y·Z 숫자 칸: 모드에 따라 뜻이 바뀜 (사용자 요청)
+// - 축 회전: 조작 대상의 월드 회전 (Euler XYZ, 도. 이동처럼 월드 기준, 무기별 배치 layout.weapon.rot과 같은 값)
+// - 이동: 조작 대상 원점의 월드 위치 (게임 단위, 사용자 요청. 시점 회전 중심과 같은 월드 원점 기준). 캐릭터 원점은 발밑 가운데, 무기 원점은 무기 상자 가운데
+// - 시점 이동: 카메라 각도 (Euler YXZ = X 위아래, Y 좌우, Z 기울기, 도). 시점은 OrbitControls라 늘 위쪽이 Y → Z는 0이고 입력 불가.
+//   X·Y를 바꾸면 거리는 그대로 두고 그 각도에서 회전 중심을 보는 자리로 카메라를 옮김
 const rotInputs = ['x', 'y', 'z'].map((axis) => document.getElementById(`rot-${axis}`));
+const cameraEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+const movePos = new THREE.Vector3();
+const worldQuat = new THREE.Quaternion();
+const worldEuler = new THREE.Euler();
 function showRotation() {
-    const r = modelPivot.rotation;
-    [r.x, r.y, r.z].forEach((rad, i) => {
+    const deg = THREE.MathUtils.radToDeg;
+    const values = rotMode === 'move' ? rotTarget().getWorldPosition(movePos).toArray()
+        : rotMode === 'view' ? (cameraEuler.setFromQuaternion(camera.quaternion), [deg(cameraEuler.x), deg(cameraEuler.y), deg(cameraEuler.z)])
+        : (worldEuler.setFromQuaternion(rotTarget().getWorldQuaternion(worldQuat)), [deg(worldEuler.x), deg(worldEuler.y), deg(worldEuler.z)]);
+    values.forEach((v, i) => {
+        rotInputs[i].nextSibling.textContent = rotMode === 'move' ? '' : ' °';
         if (rotInputs[i] === document.activeElement) return; // 자동 회전 중에도 입력 중인 칸은 덮어쓰지 않음
-        rotInputs[i].value = +THREE.MathUtils.radToDeg(rad).toFixed(1);
+        rotInputs[i].value = +v.toFixed(rotMode === 'move' ? 3 : 1);
     });
+    rotInputs[2].disabled = rotMode === 'view';
+    for (const input of rotInputs) input.step = rotMode === 'move' ? '0.01' : '1';
 }
 rotInputs.forEach((input, i) => input.addEventListener('input', () => {
-    const deg = input.valueAsNumber;
-    if (Number.isNaN(deg)) return; // 입력 도중의 빈 값이나 '-'는 무시
-    modelPivot.rotation['xyz'[i]] = THREE.MathUtils.degToRad(deg);
+    const v = input.valueAsNumber;
+    if (Number.isNaN(v)) return; // 입력 도중의 빈 값이나 '-'는 무시
+    const axis = 'xyz'[i];
+    if (rotMode === 'move') {
+        const obj = rotTarget();
+        obj.getWorldPosition(movePos)[axis] = v;
+        obj.position.copy(obj.parent.worldToLocal(movePos));
+    } else if (rotMode === 'view') {
+        cameraEuler.setFromQuaternion(camera.quaternion);
+        cameraEuler[axis] = THREE.MathUtils.degToRad(v);
+        const distance = camera.position.distanceTo(controls.target);
+        camera.position.copy(controls.target).add(new THREE.Vector3(0, 0, distance).applyEuler(cameraEuler));
+        controls.update();
+    } else {
+        const obj = rotTarget();
+        worldEuler.setFromQuaternion(obj.getWorldQuaternion(worldQuat));
+        worldEuler[axis] = THREE.MathUtils.degToRad(v);
+        obj.parent.getWorldQuaternion(parentQuat);
+        obj.quaternion.copy(parentQuat.invert().multiply(worldQuat.setFromEuler(worldEuler)));
+    }
 }));
+controls.addEventListener('change', () => { if (rotMode === 'view') showRotation(); });
+// 초기화: 전체·캐릭터·무기의 회전과 위치를 모두 처음 상태로 (자동 배치 위치 *Auto는 그대로)
 document.getElementById('rot-reset').addEventListener('click', () => {
-    modelPivot.rotation.set(0, 0, 0);
+    for (const obj of Object.values(TARGETS)) {
+        obj.rotation.set(0, 0, 0);
+        if (obj !== modelPivot) obj.position.set(0, 0, 0);
+    }
     showRotation();
 });
 showRotation();
@@ -390,7 +419,7 @@ showRotation();
 // 축 회전 모드: 블렌더식 회전 기즈모 (X/Y/Z 링 + 화면 기준 E 링)
 const gizmo = new TransformControls(camera, renderer.domElement);
 gizmo.setMode('rotate');
-gizmo.attach(modelPivot);
+gizmo.attach(modelPivot); // 조작 대상을 바꾸면 setTarget이 다시 붙임
 gizmo.enabled = false;
 gizmo.getHelper().visible = false;
 scene.add(gizmo.getHelper());
@@ -423,7 +452,7 @@ const originalPointerHover = gizmo.pointerHover.bind(gizmo);
 gizmo.pointerHover = (pointer) => {
     if (gizmo.dragging) return;
     originalPointerHover(pointer);
-    if (gizmo.axis === null || gizmo.axis === 'XYZE') gizmo.axis = nearestRing(pointer);
+    if (gizmo.mode === 'rotate' && (gizmo.axis === null || gizmo.axis === 'XYZE')) gizmo.axis = nearestRing(pointer);
 };
 
 // X/Y/Z 링 드래그를 각도 추적 방식으로: 포인터가 링 평면 위에서 중심 기준으로 돈 각도만큼 회전
@@ -450,15 +479,15 @@ const originalPointerDown = gizmo.pointerDown.bind(gizmo);
 gizmo.pointerDown = (pointer) => {
     originalPointerDown(pointer);
     ringDrag.active = false;
-    if (!gizmo.dragging || !(gizmo.axis in AXIS_VECTORS)) return;
+    if (!gizmo.dragging || gizmo.mode !== 'rotate' || !(gizmo.axis in AXIS_VECTORS)) return;
     ringDrag.axis = AXIS_VECTORS[gizmo.axis];
-    modelPivot.getWorldPosition(ringDrag.center);
+    rotTarget().getWorldPosition(ringDrag.center);
     const toCamera = ringCross.subVectors(activeCamera.position, ringDrag.center).normalize();
     if (Math.abs(ringDrag.axis.dot(toCamera)) < EDGE_ON_COS) return;
     ringDrag.plane.setFromNormalAndCoplanarPoint(ringDrag.axis, ringDrag.center);
     if (!ringPlanePoint(pointer)) return;
     ringDrag.startVec.subVectors(ringHit, ringDrag.center);
-    ringDrag.startQuat.copy(modelPivot.quaternion);
+    ringDrag.startQuat.copy(rotTarget().quaternion);
     ringDrag.active = true;
 };
 const originalPointerMove = gizmo.pointerMove.bind(gizmo);
@@ -467,16 +496,42 @@ gizmo.pointerMove = (pointer) => {
     if (!ringPlanePoint(pointer)) return;
     const current = ringHit.sub(ringDrag.center);
     const angle = Math.atan2(ringCross.crossVectors(ringDrag.startVec, current).dot(ringDrag.axis), ringDrag.startVec.dot(current));
-    modelPivot.quaternion.copy(ringQuat.setFromAxisAngle(ringDrag.axis, angle)).multiply(ringDrag.startQuat);
+    rotTarget().quaternion.copy(ringDrag.startQuat);
+    rotateTargetWorld(ringQuat.setFromAxisAngle(ringDrag.axis, angle));
     gizmo.dispatchEvent({ type: 'objectChange' });
 };
 
+// 모드: 시점 이동(카메라 궤도 회전) → 축 회전(회전 기즈모) → 이동(이동 기즈모) 순서로 바뀜. 예전 자유 회전(드래그로 모델 회전)은 뺌 (사용자 요청). 이동은 캐릭터·무기를 고른 때만 (전체를 옮기는 건 시점 이동과 같아서)
 const modeButton = document.getElementById('rot-mode');
-modeButton.addEventListener('click', () => {
-    gizmo.enabled = !gizmo.enabled;
+function setRotMode(mode) {
+    rotMode = mode;
+    gizmo.enabled = mode !== 'view';
+    controls.enableRotate = mode === 'view';
     gizmo.getHelper().visible = gizmo.enabled;
-    setText(modeButton, gizmo.enabled ? 'rot.modeAxis' : 'rot.modeFree');
+    if (gizmo.enabled) gizmo.setMode(mode === 'move' ? 'translate' : 'rotate');
+    setText(modeButton, { view: 'rot.modeView', axis: 'rot.modeAxis', move: 'rot.modeMove' }[mode]);
+    showRotation();
+}
+modeButton.addEventListener('click', () => {
+    const order = target === 'all' ? ['view', 'axis'] : ['view', 'axis', 'move'];
+    setRotMode(order[(order.indexOf(rotMode) + 1) % order.length]);
 });
+// 조작 대상: 전체 / 캐릭터 / 무기. 캐릭터가 없거나 무기를 들고 있으면 전체만 (updateTargetButtons)
+const targetButtons = [...document.querySelectorAll('#rot-target button')];
+function setTarget(name) {
+    target = name;
+    gizmo.attach(rotTarget());
+    gizmo.getHelper().visible = gizmo.enabled; // attach가 기즈모를 다시 보이게 해서, 시점 이동 모드에서도 나왔음
+    if (name === 'all' && rotMode === 'move') setRotMode('view');
+    for (const b of targetButtons) b.classList.toggle('active', b.dataset.target === name);
+    showRotation();
+}
+function updateTargetButtons() {
+    const split = character.object !== null && heldParts.length === 0;
+    for (const b of targetButtons) b.disabled = b.dataset.target !== 'all' && !split;
+    if (!split && target !== 'all') setTarget('all');
+}
+for (const b of targetButtons) b.addEventListener('click', () => setTarget(b.dataset.target));
 
 // 자동 회전: 월드 Y축(화면 위쪽) 기준 턴테이블 회전
 const AUTO_ROTATE_SPEED = Math.PI / 5; // 라디안/초 (10초에 한 바퀴), 슬라이더 배율 1일 때
@@ -529,7 +584,7 @@ let loadSeq = 0; // 가장 마지막으로 요청한 로드만 씬에 추가하�
 
 function clearModel() {
     if (currentModel) {
-        modelPivot.remove(currentModel);
+        currentModel.removeFromParent();
         disposeModel(currentModel);
         currentModel = null;
     }
@@ -538,6 +593,10 @@ function clearModel() {
         disposeModel(part);
     }
     heldParts.length = 0;
+    if (character.ride) {
+        character.ride.rest.decompose(character.ride.body.position, character.ride.body.quaternion, character.ride.body.scale);
+        character.ride = null;
+    }
     for (const m of mixers) {
         m.stopAllAction();
         m.uncacheRoot(m.getRoot());
@@ -562,7 +621,7 @@ function setCatText(el, base) {
 }
 function relabelAnimBar(path) {
     const m = path.match(/Wmn_([A-Za-z]+)_|(Ws[bp])_/); // 서브·스페셜은 'wsb'·'wsp'
-    animCat = (m[1] ?? m[2]).toLowerCase();
+    animCat = (m ? m[1] ?? m[2] : 'wsb').toLowerCase(); // 이름 규칙이 다른 모델(잉크 마인 자리의 로커 피규어 Fig_Trap)은 서브로
     for (const el of animBar.querySelectorAll('[data-i18n-cat]')) setCatText(el, el.dataset.i18nCat);
 }
 
@@ -851,6 +910,7 @@ function setUvTransform(material, channel, tx, ty) {
 // 버튼을 누른 그 프레임에 첫 프레임(또는 instant면 끝 자세)을 바로 반영. 다음 루프의 dt만큼 건너뛰지 않게
 function showFirstFrame() {
     for (const m of mixers) m.update(0);
+    followRide();
     applyUvProxies();
 }
 function playSwitch(sw, state, instant = false) {
@@ -911,41 +971,122 @@ function fitShadows(radius) {
 }
 // 크기 비교용 캐릭터 (옷 없는 몸 + 헤어 + 눈썹). 무기와 같은 게임 단위 그대로, 무기 옆(-Z, 화면 왼쪽)에 카메라를 보게 세움
 // 무기를 바꿔도 남아 있고 currentModel에는 안 넣음 (clearModel이 지우지 않게). modelPivot 아래라 회전·셰이더 모드는 같이 받음
-const character = { uvProxies: [], object: null, box: null, seq: 0, body: null, player: null, mixer: null, holding: false, animName: null, animSeq: 0, animIndex: null, clips: new Map() };
+const character = { ride: null, action: null, uvProxies: [], object: null, box: null, seq: 0, body: null, player: null, mixer: null, holding: false, animName: null, animSeq: 0, animIndex: null, clips: new Map(), tank: null, tankSeq: 0, tankCache: new Map() };
 const heldParts = []; // 캐릭터 손에 붙인 무기 (currentModel 대신. clearModel이 떼고 해제)
 const CHARACTER_GAP = 0.1; // 무기와 캐릭터 사이 간격. 보기 위한 값 (게임 근거 없음)
+// 자동 배치는 *Auto 묶음 위치로만 함 (사용자가 돌리고 옮긴 *User 값은 그대로). 시점은 사용자 이동을 빼고 자동 배치 기준으로 맞춤
 function placeCharacter(weaponBox) {
-    const { object, box } = character;
+    const { box } = character;
     const wc = weaponBox.getCenter(new THREE.Vector3());
     const cc = box.getCenter(new THREE.Vector3());
-    object.position.set(wc.x - cc.x, wc.y - cc.y, weaponBox.min.z - CHARACTER_GAP - box.max.z); // 세로는 가운데끼리 맞춤 (보기 위한 배치)
-    return box.clone().translate(object.position);
+    characterAuto.position.set(wc.x - cc.x, weaponBox.min.y - box.min.y, weaponBox.min.z - CHARACTER_GAP - box.max.z); // 세로는 무기 바닥을 캐릭터 발 높이에 맞춤 (사용자 요청. 보기 위한 배치)
+    return box.clone().translate(characterAuto.position);
 }
-function placeModel(object, depthPad = 0) {
+// layout: 캐릭터가 있을 때 무기별 배치 (weaponData item.layout, 사용자가 화면에서 맞춘 월드 값. 게임 근거 없음)
+//   { weapon: { pos: 무기 상자 가운데, rot: 도(Euler XYZ) }, chr: { pos: 캐릭터 원점(발밑 가운데) } }. 자동 배치(*Auto) 자리에 넣음
+// chr가 없으면 weapon.rot(무기 가운데 기준 회전)만 쓰고 위치는 자동 배치 (캐릭터가 없어도. 예: 메가폰 레이저 Y −90°, 사용자 요청)
+function placeModel(object, depthPad = 0, layout = null) {
     currentModel = object;
-    const box = new THREE.Box3().setFromObject(object);
+    // 스킨 메시 상자는 본 행렬(skeleton.boneMatrices)로 계산하는데, 처음 그리기 전엔 비어 있어서 상자가 틀어짐 → 시점이 모델 안으로 들어감 (트리플 토네이도)
+    object.updateMatrixWorld(true);
+    object.traverse((o) => {
+        if (!o.isSkinnedMesh) return;
+        o.skeleton.update();
+        o.boundingBox = null;
+    });
+    let box = new THREE.Box3().setFromObject(object);
+    const weaponCenter = box.getCenter(new THREE.Vector3());
+    weaponAuto.rotation.set(...(layout?.weapon?.rot ?? [0, 0, 0]).map(THREE.MathUtils.degToRad));
+    if (layout?.chr && character.object) {
+        object.position.sub(weaponCenter);
+        weaponAuto.position.fromArray(layout.weapon.pos);
+        weaponAuto.rotation.set(...layout.weapon.rot.map(THREE.MathUtils.degToRad));
+        characterAuto.position.fromArray(layout.chr.pos);
+        weaponAuto.updateMatrix();
+        box.translate(weaponCenter.negate()).applyMatrix4(weaponAuto.matrix).union(character.box.clone().translate(characterAuto.position));
+        frameView(box, depthPad);
+        weaponUser.add(object);
+        updateTargetButtons();
+        return;
+    }
+    if (layout?.weapon?.rot) {
+        weaponAuto.updateMatrix();
+        box = box.translate(weaponCenter.clone().negate()).applyMatrix4(new THREE.Matrix4().extractRotation(weaponAuto.matrix)).translate(weaponCenter);
+    }
     if (character.object) box.union(placeCharacter(box));
     const center = box.getCenter(new THREE.Vector3());
-    object.position.sub(center);
-    character.object?.position.sub(center);
+    object.position.sub(weaponCenter); // 무기 가운데가 weaponUser 원점 (무기만 돌릴 때 축)
+    weaponAuto.position.copy(weaponCenter).sub(center);
+    characterAuto.position.sub(center);
     frameView(box.translate(center.negate()), depthPad);
-    modelPivot.add(object); // 회전은 이전 모델 것을 유지
+    weaponUser.add(object); // 회전은 이전 모델 것을 유지
+    updateTargetButtons();
 }
-// 무기를 든 캐릭터: 캐릭터(바인드 자세 상자)를 가운데에 두고 시점을 맞춤
-function placeHeld() {
-    const center = character.box.getCenter(new THREE.Vector3());
-    character.object.position.copy(center).negate();
-    frameView(character.box.clone().translate(character.object.position));
+// 울트라 착지 + 캐릭터: 오른손 모델(Wsp_Pogo_R)과 그걸 X 대칭한 왼손을 캐릭터 정면 기준 ±30°에 둠 → 위에서 보면 캐릭터와 두 주먹이 정삼각형 (사용자 요청, 게임 배치 데이터 아님)
+// 두 주먹은 한 mixer로 같이 움직이게 한 그룹에 넣고, 왼손 노드 이름에 '__L'을 붙여 오른손 클립 트랙을 복제함 (왼손은 대칭이라 오른손 동작을 그대로 쓰면 거울 동작)
+//   게임 Wsp_Pogo의 _L 클립은 Root만 있고 손가락 본(_L)은 뷰어 모델에 없어서 안 씀
+const POGO_PAIR = /Wsp_Pogo_R\.glb$/;
+const POGO_FIST_DIST = 1.6; // 캐릭터 원점 ↔ 주먹 원점 거리 (눈대중)
+async function pogoFists(gltfs, path) {
+    const right = gltfs[0];
+    const left = await readGlb(path);
+    left.scene.traverse((o) => { if (o !== left.scene) o.name += '__L'; });
+    for (const clip of right.animations) {
+        clip.tracks.push(...clip.tracks.map((t) => {
+            const copy = t.clone();
+            const dot = t.name.indexOf('.');
+            copy.name = `${t.name.slice(0, dot)}__L${t.name.slice(dot)}`;
+            return copy;
+        }));
+    }
+    const group = new THREE.Group().add(right.scene, left.scene);
+    gltfs[0] = { ...right, scene: group };
+    return { right: right.scene, left: left.scene };
 }
+function placeFists(group, { right, left }, scale) {
+    // 캐릭터 묶음 좌표: 정면 = -X (몸 rotation.y = -90°), 오른쪽 = -Z
+    const a = Math.PI / 6;
+    for (const [scene, side] of [[right, -1], [left, 1]]) {
+        scene.position.set(-Math.cos(a) * POGO_FIST_DIST, 0, side * Math.sin(a) * POGO_FIST_DIST);
+        scene.rotation.y = -Math.PI / 2; // 주먹 모델 앞(+Z)도 캐릭터 정면으로 (내려꽂을 때 손등이 앞)
+        scene.scale.set(side === 1 ? -scale : scale, scale, scale); // 왼손은 모델 X 대칭
+    }
+    character.object.add(group);
+    heldParts.push(group);
+    const parent = character.object.parent; // character.box처럼 부모(시점·사용자 회전) 없이 잼
+    parent.remove(character.object);
+    character.object.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(character.object);
+    parent.add(character.object);
+    placeHeld(box);
+}
+// 무기를 든 캐릭터: 캐릭터(바인드 자세 상자)를 가운데에 두고 시점을 맞춤. 들고 있는 동안은 조작 대상이 전체뿐
+function placeHeld(box = character.box) {
+    const center = box.getCenter(new THREE.Vector3());
+    characterAuto.position.copy(center).negate();
+    frameView(box.clone().translate(characterAuto.position));
+    updateTargetButtons();
+}
+const SUB_VIEW_DISTANCE = 2;
+let framedPath = null; // 마지막으로 시점 거리를 맞춘 모델
 function frameView(box, depthPad = 0) {
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
     fitShadows(size.length() / 2);
     const fov = camera.fov * (Math.PI / 180);
     const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)); // 모델이 화면에 꽉 차는 거리
-    defaultView.set(-2 * cameraZ - depthPad, cameraZ / 2, 0); // 정측면(-X)에서 약간 위
+    // 서브만 따로 볼 때는 SUB_VIEW_DISTANCE배 멀리 (작은 모델이 화면에 꽉 차서 너무 가까움, 사용자 요청. 보기 위한 값)
+    const far = !character.object && lastGlb?.path.includes('/Wsb_') ? SUB_VIEW_DISTANCE : 1;
+    defaultView.set(-2 * cameraZ * far - depthPad, 0, 0); // 정측면(-X)에서 수평으로 (카메라 X 각도 0, 모델 가운데 높이. 사용자 요청. 예전에는 약간 위에서 내려다봄)
     if (!viewPlaced) resetView();
+    else if (lastGlb?.path !== framedPath) {
+        // 다른 모델로 바꾸면 보는 방향·중심은 그대로 두고 거리만 새 모델 크기에 맞춤 (사용자 요청). 같은 모델을 다시 불러올 때(손 선택 등)는 그대로
+        const dir = camera.position.clone().sub(controls.target).normalize();
+        camera.position.copy(controls.target).addScaledVector(dir, defaultView.length());
+        controls.update();
+    }
     viewPlaced = true;
+    framedPath = lastGlb?.path;
 }
 
 // glb 머티리얼: 텍스처 역할(셰이더 샘플러 이름), render state, 파라미터는 변환 때 material.userData.s3에 기록됨 (tools/build_glb.py)
@@ -958,6 +1099,8 @@ async function setupS3Material(material, parser) {
         const tex = await load(key);
         if (tex) material[prop] = tex;
     }
+    // 알베도 텍스처를 안 읽는 머티리얼: 알베도 = albedo_color (decompile 감사 build_glb_audit 2.5. build_glb ALBEDO_COLOR_MODELS만 기록. 예: 그레이트 배리어 안테나 M_body 거의 검정)
+    if (material.userData.s3.albedo_color && !material.map) material.color.setRGB(...material.userData.s3.albedo_color);
     // 맵이 없을 때는 Hoian_UBER 셰이더 기본값(roughness 0, metalness 0), 맵이 있으면 맵 값을 그대로 쓰도록 계수 1
     material.roughness = material.roughnessMap ? 1 : 0;
     material.metalness = material.metalnessMap ? 1 : 0;
@@ -1258,6 +1401,14 @@ normal = normalize(normal + normalize(tbn * vec3(s3PatN, sqrt(saturate(1.0 - dot
 // - sequence: clips를 동시에가 아니라 순서대로 이어서 재생 (앞 클립이 끝나면 다음 클립)
 // - reset: 한 번 재생이 끝나고 WS_RESET_FRAMES(20f, 사용자 요청) 동안 끝 자세를 두었다가 처음 상태로 (폭발·소멸 버튼). 일시정지 중에는 안 셈
 // - initial: 반복은 처음부터 켬 (게임이 저절로 재생하는 '_auto'), 한 번 재생은 끝 자세로 시작 (스플래시 실드 Start 끝 ≈ 바인드 = 설치된 모습)
+// - ride: 탑승 중(게 탱크)에 누르면 캐릭터도 같이 재생할 동작 { anim, then }. 한 번 재생 조작이면 anim은 한 번만·then은 끝난 뒤 반복,
+//   반복 조작(loop)이면 anim을 반복하고 끄면 탑승 대기(holdAnim)로
+// - chr: { 무기 클립: 캐릭터 동작 } 그 클립이 시작될 때 캐릭터도 한 번 재생. 마지막 동작이 끝나면 대기(들고 있으면 들기 동작)로.
+//   chrLead: 시퀀스에서 캐릭터 동작을 무기 단계 시작보다 몇 초 먼저 (무기 클립 길이로 단계 시작 시각을 계산해 s3Time으로 맞춤)
+// - toggle: 한 번 재생 조작을 체크박스로 (체크하면 재생 후 끝 자세 유지, 끄면 처음 상태로). noHold: 캐릭터가 들고 있으면 체크박스를 못 누름
+// - chrLoop: 반복 조작이 켜 있는 동안 캐릭터가 반복할 동작 (들고 있을 때). 끄면 들기 대기로
+// - hideAfter: 한 번 재생이 끝나기 1프레임 전에 숨길 메시 이름. 다른 조작을 시작하면 다시 보임
+// - next: 한 번 재생이 끝나자마자(반복 조작이면 끌 때) 켤 반복 조작의 클립 이름. 한 번 재생 조작은 목록도 됨 (게 탱크 → 대기, 그레이트 배리어 작동 → 회전·신호, 사용자 요청)
 // 본·보임을 움직이는 조작끼리는 하나만 켬: 같은 본을 다른 클립과 같이 걸면 three.js가 평균을 내서 게임 데이터에 없는 자세가 됨 (게임 AS가 어떻게 섞는지는 확인 못 함)
 // 발광만 바꾸는 조작은 따로 켜고 끔. 클립에 트랙이 없으면(뷰어가 안 쓰는 셰이더 파라미터만 있거나 모델에 없는 본) 조작을 안 만듦
 // 안 쓰는 클립: 컬링 밤 '*_auto'·토피도 'Wsb_Bomb_Tako'(모델에 없는 본), 크랩 탱크 'WalkForward'·'WalkBackward'(본 이름이 다른 옛 구성, 모델에는 ScaleJoint만 있음),
@@ -1278,26 +1429,51 @@ const WS_ANIMS = {
     Wsb_Bomb_Curling_Rvl: WS_CURLING,
     Wsb_Bomb_Robo: [{ clips: ['Sleep'], loop: true, key: 'wsb.sleep' }, { clips: ['Walk'], loop: true, key: 'wsb.walk' }, { clips: ['Jump'], key: 'wsb.jump' },
         { clips: ['Warning'], key: 'wsb.warning', reset: true }],
-    Wsb_Flag: [{ clips: ['transform'], key: 'wsb.deploy' }, { clips: ['wait'], loop: true, key: 'wsb.wait' }, { clips: ['signal'], loop: true, key: 'wsb.signal' }],
+    // 점프 비컨: 대기·신호를 '작동' 하나로, 설치가 끝나면 바로 작동 (사용자 요청)
+    Wsb_Flag: [{ clips: ['transform'], next: 'wait', key: 'wsb.deploy' }, { clips: ['wait', 'signal'], loop: true, key: 'wsb.active' }],
     Wsb_Bomb_Tako: [{ clips: ['Start'], key: 'wsb.detect' }, { clips: ['Fly'], loop: true, key: 'wsb.fly' }, { clips: ['Warning'], key: 'wsb.warning', reset: true },
         { clips: ['Warning_Fly'], key: 'wsb.warningFly', reset: true }],
-    Wsp_UltraShot: [{ clips: ['Wait'], loop: true, key: 'wsp.ultraShot.wait' }, { clips: ['Shot'], key: 'wsp.ultraShot.shot' }],
-    Wsp_GreatBarrier: [{ clips: ['Activate'], key: 'wsp.greatBarrier.activate' }, { clips: ['Activate_Loop'], loop: true, key: 'wsp.greatBarrier.spin' },
-        { clips: ['signal'], loop: true, key: 'wsp.greatBarrier.signal' }],
+    // 대기는 처음부터 켜고, 발사가 끝나면 다시 대기로 (게 탱크처럼, 사용자 요청)
+    // 발사: 캐릭터가 있으면 같은 순간에 Shoot_UltraShot (사용자 요청), 끝나면 들고 있으면 WaitHold_UltraShot
+    Wsp_UltraShot: [{ clips: ['Wait'], loop: true, initial: true, key: 'wsp.ultraShot.wait' },
+        { clips: ['Shot'], next: 'Wait', key: 'wsp.ultraShot.shot', chr: { Shot: 'Shoot_UltraShot' } }],
+    // 작동: 캐릭터가 있으면 같은 순간에 Sp_Start_GreatBarrier (사용자 요청). 무기를 캐릭터 본에 붙이는 게임 데이터(WeaponSpGreatBarrier ModelInfo)는 없어서 따로 둠
+    // 대기(Wait)는 처음부터 켬 (사용자 요청)
+    // 발동전(Wait)은 처음부터 켬. 작동이 끝나면 대기(회전 + 신호 + 드론 Activate_Drone)를 켬 (사용자 요청. 드론 클립은 attachSubModels가 합침)
+    Wsp_GreatBarrier: [{ clips: ['Wait'], loop: true, initial: true, key: 'wsp.greatBarrier.preActivate' },
+        { clips: ['Activate'], next: 'Activate_Loop', key: 'wsp.greatBarrier.activate', chr: { Activate: 'Sp_Start_GreatBarrier' } },
+        { clips: ['Activate_Loop', 'signal', 'Activate_Drone'], loop: true, key: 'wsp.greatBarrier.idle' }],
     Wsp_GreatBarrier_Drone: [{ clips: ['Activate_Drone'], loop: true, key: 'wsp.greatBarrierDrone.activate' }],
     Wsp_ShockSonar: [{ clips: ['Attack'], key: 'wsp.shockSonar.attack' }],
     Wsp_MicroLaserBit: [{ clips: ['PreAciton'], loop: true, key: 'wsp.microLaserBit.ready' }, { clips: ['Firing'], loop: true, key: 'wsp.microLaserBit.firing' }],
-    Wsp_SuperStamp: [{ clips: ['Smash'], key: 'wsp.superStamp.smash' }, { clips: ['Return'], key: 'wsp.superStamp.return' }],
-    Wsp_Chariot: [{ clips: ['TransformSphere'], key: 'wsp.chariot.toSphere' }, { clips: ['TransformCrab'], key: 'wsp.chariot.toCrab' },
-        { clips: ['Wait'], loop: true, key: 'wsp.chariot.wait' }, { clips: ['WalkF'], loop: true, key: 'wsp.chariot.walkF' },
-        { clips: ['WalkB'], loop: true, key: 'wsp.chariot.walkB' }, { clips: ['WalkL'], loop: true, key: 'wsp.chariot.walkL' },
-        { clips: ['WalkR'], loop: true, key: 'wsp.chariot.walkR' }, { clips: ['Turn'], loop: true, key: 'wsp.chariot.turn' },
-        { clips: ['ShootBullet'], loop: true, key: 'wsp.chariot.shootBullet' }, { clips: ['ShootCannonballUp'], key: 'wsp.chariot.cannonUp' },
-        { clips: ['ShootCannonballMdl'], key: 'wsp.chariot.cannonMid' }, { clips: ['ShootCannonballDwn'], key: 'wsp.chariot.cannonDown' },
-        { clips: ['ShootCannonball'], key: 'wsp.chariot.cannonRecoil' }, { clips: ['Caution'], loop: true, key: 'wsp.chariot.caution' }],
-    Wsp_SkewerTackle: [{ clips: ['Sp_Start_Skewer'], key: 'wsp.skewerTackle.start' }, { clips: ['Skewer_Invocation'], key: 'wsp.skewerTackle.explode', reset: true },
-        { clips: ['Skewer_Run'], loop: true, key: 'wsp.skewerTackle.run' }],
-    Wsp_TripleTornadoBeacon: [{ clips: ['Shake'], key: 'wsp.tripleTornadoBeacon.deploy' }],
+    // 캐릭터가 있으면 플레이어 동작도 같이 (사용자 요청): 내려찍기 Attack_SuperStamp(56f), 연속 내려찍기 AttackRush_SuperStamp(40f), 되돌리기 Return_SuperStamp(60f).
+    // 무기는 Smash·Return(20f)뿐이라 연속 내려찍기도 무기는 Smash. 길이가 달라서 시작만 맞춤.
+    // 되돌리기의 팔 늘어남(Arm_1·Arm_2 X 스케일 최대 1.52, 18~48f)은 게임 데이터 그대로
+    Wsp_SuperStamp: [{ clips: ['Smash'], key: 'wsp.superStamp.smash', chr: { Smash: 'Attack_SuperStamp' } },
+        // 연속 내려찍기: 반복 (사용자 요청). 켜 있는 동안 무기 Smash와 캐릭터 AttackRush_SuperStamp를 각각 반복 (chrLoop), 끄면 들기 대기로
+        { clips: ['Smash'], loop: true, key: 'wsp.superStamp.rush', chrLoop: 'AttackRush_SuperStamp' },
+        { clips: ['Return'], key: 'wsp.superStamp.return', chr: { Return: 'Return_SuperStamp' } }],
+    // 구체 모드: 끝나면 집게(Scissors__M_Body)를 숨김 (게임 화면 관찰, 사용자 요청. 게임 데이터 보임 커브엔 없음: TransformSphere는 BodyCrab만 숨김)
+    Wsp_Chariot: [{ clips: ['TransformSphere'], ride: { anim: 'ToSquid_Chariot' }, hideAfter: ['Scissors__M_Body'], key: 'wsp.chariot.toSphere' },
+        { clips: ['TransformCrab'], ride: { anim: 'ToHuman_Chariot', then: 'WaitHold_Chariot' }, next: 'Wait', key: 'wsp.chariot.toCrab' },
+        // 구체 모드 말고는 끝나거나(한 번 재생) 끄면(반복) 대기로 (next, 사용자 요청). 대포 반동(ShootCannonball, 4f)은 뭘 하는지 몰라서 버튼 숨김 (사용자 요청)
+        { clips: ['Wait'], loop: true, initial: true, key: 'wsp.chariot.wait' }, { clips: ['WalkF'], loop: true, next: 'Wait', key: 'wsp.chariot.walkF' },
+        { clips: ['WalkB'], loop: true, next: 'Wait', key: 'wsp.chariot.walkB' }, { clips: ['WalkL'], loop: true, next: 'Wait', key: 'wsp.chariot.walkL' },
+        { clips: ['WalkR'], loop: true, next: 'Wait', key: 'wsp.chariot.walkR' }, { clips: ['Turn'], loop: true, next: 'Wait', key: 'wsp.chariot.turn' },
+        { clips: ['ShootBullet'], loop: true, ride: { anim: 'WaitShoot_Chariot' }, next: 'Wait', key: 'wsp.chariot.shootBullet' },
+        { clips: ['ShootCannonballUp'], ride: { anim: 'WaitShootCannonUp_Chariot', then: 'WaitHold_Chariot' }, next: 'Wait', key: 'wsp.chariot.cannonUp' },
+        { clips: ['ShootCannonballMdl'], ride: { anim: 'WaitShootCannonMdl_Chariot', then: 'WaitHold_Chariot' }, next: 'Wait', key: 'wsp.chariot.cannonMid' },
+        { clips: ['ShootCannonballDwn'], ride: { anim: 'WaitShootCannonDwn_Chariot', then: 'WaitHold_Chariot' }, next: 'Wait', key: 'wsp.chariot.cannonDown' },
+        { clips: ['Caution'], loop: true, next: 'Wait', key: 'wsp.chariot.caution' }],
+    // 캐릭터가 있으면 같은 이름의 플레이어 동작을 같이 (사용자 요청. Player00에 무기 클립과 같은 이름 Sp_Start_Skewer·Skewer_*가 있음)
+    // 점프: Skewer_Jump → Skewer_Jump_Ed를 이어서
+    // 달리기(Skewer_Run)가 기본 상태: 처음부터 켜고, 시작·폭발·점프가 끝나면 다시 달리기 (사용자 요청. 폭발도 예전의 '잠시 뒤 원래대로' 대신)
+    Wsp_SkewerTackle: [{ clips: ['Sp_Start_Skewer'], next: 'Skewer_Run', key: 'wsp.skewerTackle.start', chr: { Sp_Start_Skewer: 'Sp_Start_Skewer' } },
+        { clips: ['Skewer_Invocation'], next: 'Skewer_Run', key: 'wsp.skewerTackle.explode', chr: { Skewer_Invocation: 'Skewer_Invocation' } },
+        { clips: ['Skewer_Run'], loop: true, initial: true, key: 'wsp.skewerTackle.run', chrLoop: 'Skewer_Run' },
+        { clips: ['Skewer_Jump', 'Skewer_Jump_Ed'], sequence: true, next: 'Skewer_Run', key: 'wsp.skewerTackle.jump', chr: { Skewer_Jump: 'Skewer_Jump', Skewer_Jump_Ed: 'Skewer_Jump_Ed' } }],
+    // 설치: 체크하면 한 번 재생하고 끝 자세 유지, 끄면 원래대로 (toggle). 들고 있을 때는 못 누름 (noHold). 사용자 요청
+    Wsp_TripleTornadoBeacon: [{ clips: ['Shake'], toggle: true, noHold: true, key: 'wsp.tripleTornadoBeacon.deploy' }],
     Wsp_TripleTornado: [{ clips: ['Wsp_TripleTornado_Auto'], key: 'wsp.tripleTornado.fly' }],
     Wsp_EnergyStand: [{ clips: ['Appear'], key: 'wsp.energyStand.appear' }, { clips: ['Throw'], loop: true, key: 'wsp.energyStand.throw' },
         { clips: ['BreakSign'], key: 'wsp.energyStand.breakSign' }],
@@ -1306,7 +1482,11 @@ const WS_ANIMS = {
         { clips: ['Shot_End'], key: 'wsp.fireworkPipe.shotEnd' }],
     Wsp_FireworkBomb: [{ clips: ['Shake'], key: 'wsp.fireworkBomb.deploy' }, { clips: ['Warning'], key: 'wsp.fireworkBomb.warning', reset: true }],
     // 준비 → 시작 → 내려찍기 → 끝을 한 버튼으로 이어서 (사용자 요청. 게임이 이 순서로 잇는지는 AS 확인 안 함)
-    Wsp_Pogo_R: [{ clips: ['Sp_PreStart_Pogo_R', 'Sp_Start_Pogo_R_St', 'Sp_Start_Pogo_R', 'Sp_Start_Pogo_R_Ed'], sequence: true, key: 'wsp.pogo.cast' }],
+    // 캐릭터가 있으면 무기 단계에 맞춰 캐릭터도 같은 이름 동작 (Player00_v-600의 Sp_Start_Pogo_St/Sp_Start_Pogo/Sp_Start_Pogo_Ed, 사용자 요청).
+    //   캐릭터 쪽엔 PreStart가 없어서 무기 St가 시작할 때 캐릭터 St 시작. 길이가 달라서(St 1.167 vs 1.333초, Ed 1.5 vs 0.067초) 단계 시작만 맞춤
+    //   chrLead: 캐릭터 동작을 무기 단계보다 0.25초(15프레임) 먼저 시작 (사용자 요청)
+    Wsp_Pogo_R: [{ clips: ['Sp_PreStart_Pogo_R', 'Sp_Start_Pogo_R_St', 'Sp_Start_Pogo_R', 'Sp_Start_Pogo_R_Ed'], sequence: true, key: 'wsp.pogo.cast', chrLead: 0.25,
+        chr: { Sp_Start_Pogo_R_St: 'Sp_Start_Pogo_St', Sp_Start_Pogo_R: 'Sp_Start_Pogo', Sp_Start_Pogo_R_Ed: 'Sp_Start_Pogo_Ed' } }],
     Wsp_Chimney: [{ clips: ['Activate'], loop: true, key: 'wsp.chimney.activate' }],
     Wsp_ChimneyWall: [{ clips: ['Open'], initial: true, key: 'wsp.chimneyWall.cast' }, { clips: ['Close'], key: 'wsp.chimneyWall.vanish', reset: true },
         { clips: ['Caution'], key: 'wsp.chimneyWall.caution' }],
@@ -1322,17 +1502,52 @@ function wsCheckResets() {
         control.resetAt = null;
         for (const action of control.actions) action.stop(); // 멈추면 원래 상태로 돌아감
     }
+    // 시퀀스 캐릭터 동작 예약 (chrLead)
+    for (const control of wsControls) {
+        while (control.chrQueue?.length && s3Time.value >= control.chrQueue[0].at) control.chrQueue.shift().play();
+    }
 }
+// 기본 자세 클립: 이 클립 끝 자세를 다른 클립이 안 움직이는 본에 채우고, 반복을 끄면 이 끝 자세로 돌아감.
+// 게 탱크: Wait·Walk*·Shoot*는 TransformCrab보다 본이 3개 적어서(18 vs 21) 그대로 틀면 그 본이 바인드(접힌 껍데기)로 남아 열린·접힌 모습이 겹쳐 보임
+const WS_BASE = { Wsp_Chariot: { clip: 'TransformCrab', skip: ['TransformSphere', 'Sphere'] } };
 function setupSubSpecial(clipSets, path) {
     wsBar.replaceChildren();
     wsControls = [];
-    const entries = WS_ANIMS[path.match(/(Ws[bp]_\w+)\.glb$/)?.[1]];
+    const key = path.match(/(Ws[bp]_\w+)\.glb$/)?.[1];
+    const entries = WS_ANIMS[key];
     if (!entries) return;
     const [clips] = clipSets;
     const [mixer] = mixers;
+    const base = WS_BASE[key] && clips.get(WS_BASE[key].clip);
+    if (base) {
+        const ends = base.tracks.map((t) => new t.constructor(t.name, [0], t.values.slice(-t.getValueSize())));
+        for (const [name, clip] of clips) {
+            if (clip === base || WS_BASE[key].skip.includes(name)) continue;
+            const has = new Set(clip.tracks.map((t) => t.name));
+            clip.tracks.push(...ends.filter((t) => !has.has(t.name)));
+        }
+    }
+    // next로 이어서 켤 반복 조작 (이미 켜져 있으면 그대로)
+    const startNext = (name) => {
+        const next = wsControls.find((c) => c.entry.loop && c.entry.clips.includes(name));
+        if (!next || !mixers.includes(mixer)) return false;
+        if (!next.input.checked) {
+            next.input.checked = true;
+            next.start();
+        }
+        return true;
+    };
+    let baseActions = null;
+    const restoreBase = () => {
+        for (const action of baseActions ?? []) {
+            action.reset().play();
+            action.time = action.getClip().duration;
+        }
+    };
     const stopOthers = (self) => {
         for (const other of wsControls) {
             if (other === self || !other.skeletal) continue;
+            other.chrQueue = null;
             for (const action of other.actions) action.stop(); // 멈추면 원래 자세로 돌아감
             if (other.input) other.input.checked = false;
         }
@@ -1341,6 +1556,18 @@ function setupSubSpecial(clipSets, path) {
         const loops = entry.loop ? entry.clips : entry.loops ?? [];
         const names = [...(entry.loop ? [] : entry.clips), ...loops].filter((name) => clips.get(name)?.tracks.length && clips.get(name).duration > 0);
         if (!names.length) continue;
+        if (entry.hideAfter) {
+            // 본 커브 길이(TransformSphere 0.383초 = 23프레임)에서 끝나게: 보임 커브(BodyCrab)에 0.8초 키가 있어 클립이 0.8초로 늘어나 있음 (그 구간 값은 숨김 그대로)
+            // 숨기는 시점은 끝 프레임보다 1프레임 앞 (사용자 요청). 보임 트랙으로 넣어서 다른 조작이 이 클립을 멈추면 mixer가 원래대로(보임) 되돌림
+            for (const name of names) {
+                const clip = clips.get(name);
+                clip.duration = Math.max(...clip.tracks.filter((t) => !t.name.endsWith('.visible')).map((t) => t.times[t.times.length - 1]));
+                const at = clip.duration - 1 / 60;
+                mixer.getRoot().traverse((o) => {
+                    if (o.isMesh && entry.hideAfter.includes(o.name)) clip.tracks.push(new THREE.BooleanKeyframeTrack(`${o.uuid}.visible`, [0, at], [true, false]));
+                });
+            }
+        }
         const actions = names.map((name) => {
             const action = mixer.clipAction(clips.get(name));
             const loop = loops.includes(name);
@@ -1348,18 +1575,45 @@ function setupSubSpecial(clipSets, path) {
             action.clampWhenFinished = !loop; // 끝 자세 유지 (reset이면 잠시 뒤 원래 상태로, wsCheckResets)
             return action;
         });
-        const control = { actions, skeletal: names.some((name) => clips.get(name).tracks.some((t) => /\.(position|quaternion|scale|visible)$/.test(t.name))) };
+        // chr: 무기 클립이 시작될 때 캐릭터도 같은 단계 동작. 시퀀스 마지막 단계면 끝난 뒤 대기로
+        const playChr = (action) => {
+            const anim = entry.chr?.[action.getClip().name];
+            if (!anim || !character.object) return;
+            const last = action === actions[actions.length - 1];
+            playCharacterAnim(anim, { once: true, then: last ? (heldParts.length && holdAnim(path)) || 'Wait' : null });
+        };
+        const control = { entry, actions, skeletal: names.some((name) => clips.get(name).tracks.some((t) => /\.(position|quaternion|scale|visible)$/.test(t.name))) };
         const start = () => {
             if (!mixers.includes(mixer)) return; // 다음 모델을 불러오는 중 (이 mixer는 이미 정리됨)
             control.resetAt = null;
             if (control.skeletal) stopOthers(control);
             for (const action of entry.sequence ? actions.slice(1) : []) action.stop();
             for (const action of entry.sequence ? actions.slice(0, 1) : actions) action.reset().play();
+            if (entry.sequence && entry.chr) {
+                // 단계 시작 시각 = 앞 클립 길이의 합. 캐릭터는 chrLead초 먼저 (첫 단계보다 앞설 수는 없음)
+                let t = s3Time.value;
+                control.chrQueue = actions.map((action) => {
+                    const at = Math.max(s3Time.value, t - (entry.chrLead ?? 0));
+                    t += action.getClip().duration;
+                    return { at, play: () => playChr(action) };
+                }).filter((q, i) => entry.chr[actions[i].getClip().name]);
+                wsCheckResets();
+            } else playChr(actions[0]);
+            // 탑승 중이면 캐릭터도 같은 순간에 변신 동작 (ride: 구체 모드 ToSquid_Chariot, 게 모드 ToHuman_Chariot → 끝나면 WaitHold_Chariot 반복)
+            if (entry.ride && character.ride) playCharacterAnim(entry.ride.anim, entry.loop ? {} : { once: true, then: entry.ride.then });
+            if (entry.chrLoop && heldParts.length) playCharacterAnim(entry.chrLoop); // 반복 조작 동안 캐릭터도 이 동작 반복 (들고 있을 때)
             showFirstFrame();
         };
+        control.start = start;
         if (entry.reset) {
             mixer.addEventListener('finished', ({ action }) => {
                 if (actions.includes(action) && !actions.some((a) => a.isRunning())) control.resetAt = s3Time.value + WS_RESET_FRAMES / 60; // 클립이 여럿이면 다 끝난 뒤
+            });
+        }
+        if (entry.next && !entry.loop) {
+            mixer.addEventListener('finished', ({ action }) => {
+                if (!actions.includes(action) || actions.some((a) => a.isRunning())) return;
+                queueMicrotask(() => { for (const name of [entry.next].flat()) startNext(name); }); // mixer.update 도중(finished 이벤트)이라 액션 목록을 바꾸지 않게 update가 끝난 뒤 켬
             });
         }
         if (entry.sequence) {
@@ -1368,12 +1622,15 @@ function setupSubSpecial(clipSets, path) {
                 if (!next) return;
                 next.reset().play();
                 action.stop();
+                if (!entry.chr || !entry.sequence) playChr(next); // 시퀀스 캐릭터 동작은 chrQueue가 시각에 맞춰 재생
             });
         }
-        if (entry.loop) {
+        if (entry.loop || entry.toggle) {
             const label = document.createElement('label');
             const input = document.createElement('input');
             input.type = 'checkbox';
+            // noHold: 캐릭터가 들고 있을 때는 못 누름 (트리플 토네이도 장치 설치, 사용자 요청)
+            input.disabled = entry.noHold && character.object !== null && character.holding && holdAnim(path) !== undefined;
             const text = document.createElement('span');
             setText(text, entry.key);
             label.append(input, ' ', text);
@@ -1384,6 +1641,10 @@ function setupSubSpecial(clipSets, path) {
                     return;
                 }
                 for (const action of actions) action.stop();
+                if (entry.ride && character.ride) playCharacterAnim(holdAnim(path)); // 반복 사격을 끄면 캐릭터도 탑승 대기로
+                if (entry.chrLoop && heldParts.length) playCharacterAnim(holdAnim(path));
+                if (entry.next && startNext(entry.next)) return;
+                restoreBase();
                 showFirstFrame();
             });
             control.input = input;
@@ -1404,8 +1665,10 @@ function setupSubSpecial(clipSets, path) {
                 }
             }
         }
+        if (base && names.includes(WS_BASE[key].clip)) baseActions = actions;
         wsControls.push(control);
     }
+    if (entries.some((entry) => entry.initial)) showFirstFrame(); // 시작 자세를 바로 적용해서 placeModel이 그 자세로 시점을 맞추게 (게 탱크: 바인드는 접힌·열린 모습이 겹쳐 보임)
     wsBar.hidden = !wsControls.length;
 }
 
@@ -1456,6 +1719,15 @@ const ejectToggle = document.getElementById('shelter-eject-toggle');
 const ejectSelect = document.getElementById('shelter-eject');
 animControls.push(ejectToggle, ejectSelect.parentElement);
 let ejected = false; // 사출 버튼 상태. 모델을 바꿔도 유지
+// 서브 변종 (히어로 _Msn, 옥타링 _Rvl): 목록에는 기본 모델 하나만 두고 메뉴로 바꿔 불러옴 (사용자 요청. 서브 전용 메뉴)
+// 고를 수 있는 변종은 weaponData 서브 항목의 variants. 목록에서 고르면 늘 기본 모델
+const WSB_VARIANT = /^(glb\/Wsb_\w+?)(_Msn|_Rvl)?\.glb$/;
+const wsbVariant = document.getElementById('wsb-variant');
+animControls.push(wsbVariant.parentElement);
+wsbVariant.addEventListener('change', () => {
+    const base = lastGlb.path.match(WSB_VARIANT)[1];
+    loadGlb(`${base}${wsbVariant.value}.glb`, false, lastGlb.scale, lastGlb.hold, lastGlb.layout);
+});
 // 히어로 슈터 레벨: 목록에는 하나만 두고 Msn0Lv0~2 파일을 슬라이더로 바꿔 불러옴
 const HERO_LEVEL = /(Wmn_Shooter_Msn0Lv)(\d)/;
 const heroLevel = document.getElementById('hero-level');
@@ -1493,17 +1765,81 @@ function ejectClip(clips) {
     return new THREE.AnimationClip('Fly_Eject', fly.duration, [...fly.tracks, ...hold]);
 }
 
-async function loadGlb(path, twoHanded = false) {
+// 서브 모델: 다른 glb를 본에 그대로 붙임 (게임 액터 ModelInfo SubModels. 오프셋 항목 없음)
+// 에너지 스탠드: BulletSpEnergyStandFridge의 SubModels가 Drink.fmdb를 본 Drink0~3에 붙임. 한 번 읽고 복제해서 geometry·머티리얼 공유
+// 캔은 자기 본(Drink)에 스킨된 메시라 SkeletonUtils로 복제 (Object3D.clone은 원본 뼈대를 그대로 가리켜서 4개가 모두 원본 자리에 그려짐)
+// 그레이트 배리어: BulletSpGreatBarrier의 SubModels가 Wsp_GreatBarrier_Drone.fmdb를 본 AttachPoint에 붙임
+// follow: false면 처음 자세(pose 클립 첫 프레임의 본 값)의 본 자리에만 놓고 그 뒤 본 움직임은 안 따라감
+//   (드론, 사용자 요청: 배리어와 드론이 서로 영향 없게. 처음 자세 = 처음 켜지는 대기 Wait)
+const SUB_MODELS = { Wsp_EnergyStand: { file: 'Wsp_EnergyStand_Drink', bones: ['Drink0', 'Drink1', 'Drink2', 'Drink3'] },
+    Wsp_GreatBarrier: { file: 'Wsp_GreatBarrier_Drone', bones: ['AttachPoint'], follow: false, pose: 'Wait' } };
+// 서브 모델의 스켈레탈 클립은 본 모델 클립에 합침 (트랙이 본 이름으로 붙어서 같은 mixer로 재생됨. 셰이더 파라미터 트랙은 buildClips가 붙인 메시에서 만듦)
+async function attachSubModels(gltfs, path) {
+    const sub = SUB_MODELS[path.match(/([^/]+)\.glb$/)[1]];
+    if (!sub) return;
+    const { scene: model, animations } = await readGlb(`glb/${sub.file}.glb`);
+    for (const g of gltfs) {
+        for (const bone of sub.bones) {
+            const copy = cloneSkinned(model);
+            copy.userData.subModel = sub.file;
+            const node = g.scene.getObjectByName(bone);
+            if (sub.follow === false) {
+                // 처음 자세의 본 값을 잠깐 넣고 장면 원점 기준 자리를 구한 뒤 되돌림 (그 본의 첫 키만. 부모 본은 바인드 그대로)
+                const saved = [node.position.clone(), node.quaternion.clone(), node.scale.clone()];
+                for (const t of g.animations.find((c) => c.name === sub.pose)?.tracks ?? []) {
+                    const [name, prop] = t.name.split('.');
+                    if (name === bone) node[prop].fromArray(t.values, 0);
+                }
+                g.scene.updateMatrixWorld(true);
+                g.scene.matrixWorld.clone().invert().multiply(node.matrixWorld).decompose(copy.position, copy.quaternion, copy.scale);
+                [node.position, node.quaternion, node.scale].forEach((v, k) => v.copy(saved[k]));
+                g.scene.add(copy);
+            } else node.add(copy);
+        }
+        for (const clip of animations) {
+            if (g.animations.some((c) => c.name === clip.name)) throw new Error(`서브 모델 클립 이름이 겹침: ${clip.name}`);
+            g.animations.push(clip);
+        }
+    }
+}
+// 그레이트 배리어 드론 상승 (사용자 요청, 게임 데이터 아님): 작동(Activate) 동안 드론이 위로 +4 (ease in-out), 회전(Activate_Loop) 중에는 올라간 채 유지
+const DRONE_RISE = 4;
+function setupGreatBarrier(gltfs, clipSets, path) {
+    if (!path.includes('Wsp_GreatBarrier.glb')) return;
+    gltfs.forEach((g, i) => {
+        const drone = g.scene.children.find((c) => c.userData.subModel === 'Wsp_GreatBarrier_Drone');
+        const base = drone.position.y;
+        const activate = clipSets[i].get('Activate');
+        const times = Array.from({ length: 31 }, (_, k) => activate.duration * k / 30);
+        const values = times.flatMap((t) => [drone.position.x, base + DRONE_RISE * (0.5 - 0.5 * Math.cos(Math.PI * t / activate.duration)), drone.position.z]);
+        activate.tracks.push(new THREE.VectorKeyframeTrack(`${drone.uuid}.position`, times, values));
+        clipSets[i].get('Activate_Loop').tracks.push(new THREE.VectorKeyframeTrack(`${drone.uuid}.position`, [0], [drone.position.x, base + DRONE_RISE, drone.position.z]));
+    });
+}
+// scale: 모델 배율 (weaponData item.scale). 같은 모델을 다시 불러올 때(손 선택 등)는 이전 배율 유지
+// hold: 손에 들 때 무기 쪽 기준점 (weaponData item.hold). 같은 모델을 다시 불러올 때는 이전 값 유지
+// layout: 캐릭터와 같이 둘 때 무기별 배치 (weaponData item.layout, placeModel). 같은 모델을 다시 불러올 때는 이전 값 유지
+async function loadGlb(path, twoHanded = false, scale = path === lastGlb?.path ? lastGlb.scale : 1, hold = path === lastGlb?.path ? lastGlb.hold : null, layout = path === lastGlb?.path ? lastGlb.layout : null) {
     const seq = ++loadSeq;
-    lastGlb = { path, twoHanded };
+    lastGlb = { path, twoHanded, scale, hold, layout };
     clearModel();
     const held = character.object !== null && character.holding && holdAnim(path) !== undefined;
+    const tankReady = character.object ? setTank(tankFor(path, held)) : null; // 무기와 같이 받기 시작 (무기 다음에 받으면 한 박자 늦게 바뀜)
     const hand = twoHanded ? (held ? 'both' : handSelect.value) : 'R'; // 들 때는 게임처럼 양손
-    const paths = { R: [path], L: [path.replace(/\.glb$/, '_L.glb')], both: [path, path.replace(/\.glb$/, '_L.glb')] }[hand];
+    // 멀티 미사일: 게임 액터 MirrorModel(RightFmdb = Wsp_Missile)이라 오른쪽 모델을 대칭해서 왼쪽에도 하나 더 (들 때만)
+    const mirrorPair = held && MIRROR_PAIR.test(path);
+    const paths = mirrorPair ? [path, path] : { R: [path], L: [path.replace(/\.glb$/, '_L.glb')], both: [path, path.replace(/\.glb$/, '_L.glb')] }[hand];
     const shelter = path.includes('Wmn_Shelter_');
     try {
         const gltfs = await Promise.all(paths.map(readGlb));
         if (seq !== loadSeq) return; // 그 사이 다른 모델이 요청됨
+        await attachSubModels(gltfs, path);
+        if (seq !== loadSeq) return;
+        // 캐릭터 없이 잉크제트를 볼 때만 탱크를 옆에 같이 (캐릭터가 있으면 등에 장착, setTank)
+        const jetTank = !character.object && /Wsp_JetPackLauncher\.glb$/.test(path) ? await readGlb('glb/Tnk_JetPack.glb') : null;
+        if (seq !== loadSeq) return;
+        const fists = character.object && POGO_PAIR.test(path) ? await pogoFists(gltfs, path) : null;
+        if (seq !== loadSeq) return;
         const canEject = shelter && gltfs[0].animations.some((clip) => clip.name === 'Fly');
         shelterEject = canEject && ejected && !held ? ejectSelect.value : null;
         if (shelterEject === 'both') {
@@ -1513,10 +1849,18 @@ async function loadGlb(path, twoHanded = false) {
         const clipSets = setupAnimations(gltfs, path);
         setupStringer(clipSets, path);
         setupSaber(gltfs, clipSets, path);
+        setupGreatBarrier(gltfs, clipSets, path);
         setupSubSpecial(clipSets, path);
         // 일시정지/재생은 재생할 애니메이션이 있는 모델만 (머뉴버는 양손 선택 때문에 animBar가 떠도 애니메이션이 없음)
         const level = path.match(HERO_LEVEL)?.[2];
         heroLevel.parentElement.hidden = level === undefined;
+        const variant = path.match(WSB_VARIANT);
+        const variants = variant && wsbVariants[variant[1].slice('glb/'.length)];
+        wsbVariant.parentElement.hidden = !variants;
+        if (variants) {
+            for (const option of wsbVariant.options) option.hidden = option.value !== '' && !variants.includes(option.value);
+            wsbVariant.value = variant[2] ?? '';
+        }
         if (level !== undefined) {
             heroLevel.value = level;
             heroLevelText.textContent = `Lv${level}`;
@@ -1531,11 +1875,21 @@ async function loadGlb(path, twoHanded = false) {
         updateAnimBar();
         holdButton.hidden = !character.object || holdAnim(path) === undefined;
         setText(holdButton, held ? 'chr.release' : 'chr.hold');
+        tankReady?.then(updateTankControls);
+        const chrAct = held ? CHR_ACTIONS[path.match(/([^/]+)\.glb$/)[1]] : null;
+        chrShootButton.hidden = !chrAct?.shoot;
+        chrLoopInput.parentElement.hidden = !chrAct?.loop;
+        chrLoopInput.checked = false;
         playCharacterAnim(held ? holdAnim(path) : 'Wait');
         if (held) {
-            holdWeapons(gltfs.map((g) => g.scene), path, clipSets);
+            holdWeapons(gltfs.map((g) => g.scene), path, clipSets, scale, hold);
             return;
         }
+        if (fists) {
+            placeFists(gltfs[0].scene, fists, scale);
+            return;
+        }
+        if (scale !== 1) for (const g of gltfs) g.scene.scale.multiplyScalar(scale);
         if (shelterEject) {
             const [handle, canopy] = { canopy: [null, 0], handle: [0, null], both: [0, 1] }[shelterEject].map((i) => i === null ? null : gltfs[i]);
             if (handle) handle.scene.traverse((obj) => { if (obj.isMesh && shelterPart(obj) !== 'Gun') obj.visible = false; });
@@ -1559,8 +1913,17 @@ async function loadGlb(path, twoHanded = false) {
             placeModel(new THREE.Group().add(handle.scene, canopy.scene));
             return;
         }
+        if (jetTank) {
+            // 탱크를 발사기 오른쪽(+Z)에 바인드 자세로, 바닥을 맞춤 (보기 위한 배치, 간격 0.1)
+            const box = new THREE.Box3().setFromObject(gltfs[0].scene);
+            const tankBox = new THREE.Box3().setFromObject(jetTank.scene);
+            jetTank.scene.position.z += box.max.z - tankBox.min.z + 0.1;
+            jetTank.scene.position.y += box.min.y - tankBox.min.y;
+            placeModel(new THREE.Group().add(gltfs[0].scene, jetTank.scene));
+            return;
+        }
         if (gltfs.length === 1) {
-            placeModel(gltfs[0].scene);
+            placeModel(gltfs[0].scene, 0, layout);
             return;
         }
         // 양손: 대칭면(X = 0)을 사이에 두고 오른손은 -X, 왼손은 +X. 간격은 보기 위한 값 (게임 근거 없음)
@@ -1608,16 +1971,23 @@ const CHARACTERS = {
 // 장비: 게임 RowId로 둠 (나중에 고르기 기능을 넣을 수 있게). 지금은 이 세 가지만 불러옴
 // 모델 파일: 상의·하의는 <RowId>_F / _M (여 / 남, 오징어·문어 공통), 신발은 <RowId> 하나 (HoianViewer PlayerScene.SetClothes·SetBottom·SetShoes.
 //   상의는 게임 표에 성별 없는 모델이 있으면 그것을 먼저 쓰지만, 지금 장비는 성별 모델만 있음)
-const characterGear = { clothes: 'Clt_TES000', bottom: 'Btm_000', shoes: 'Shs_FST000' };
-const gearFiles = (sex) => [`${characterGear.clothes}_${sex}`, `${characterGear.bottom}_${sex}`, characterGear.shoes];
+// null이면 그 부위는 안 불러옴. head(헤드기어)는 나중에 넣을 자리 (모델 파일이 성별 없이 <RowId> 하나라고 둠: 게임 데이터 미확인)
+const characterGear = { head: null, clothes: 'Clt_TES000', bottom: 'Btm_000', shoes: 'Shs_FST000' };
+const GEAR_SEXED = { head: false, clothes: true, bottom: true, shoes: false };
+// 탱크 끈 규격 (사용자 요청): 옷 두께 L 두꺼움 / M 좀 두꺼움 / S 얇음. 옷마다 정할 예정이고, 지금 옷(Clt_TES000, 얇은 티)은 S
+// 탱크의 Carabiner_·Belt_Under_·Belt_EndStop_L_ 메시 중 <규격>(+여자면 F) 것만 보임 (setTank)
+const GEAR_TANK_FIT = 'S';
+const gearFiles = (sex) => Object.entries(characterGear).filter(([, id]) => id).map(([kind, id]) => [kind, GEAR_SEXED[kind] ? `${id}_${sex}` : id]);
 let gearTable = null; // glb/gear.json (tools/build_gear_masks.py): {종류: {RowId: {mask: {F, M, V1}}}}
 const characterSelect = document.getElementById('character-select');
 async function loadCharacter(key) {
     const seq = ++character.seq;
     const sex = key.endsWith('F') ? 'F' : 'M';
+    character.sex = sex;
+    const gearList = gearFiles(sex);
     const [gltfs, gearGltfs] = key === 'none' ? [[], []] : await Promise.all([
         Promise.all(CHARACTERS[key].map((name) => readGlb(`glb/${name}.glb`))),
-        Promise.all(gearFiles(sex).map((name) => readGlb(`glb/${name}.glb`))),
+        Promise.all(gearList.map(([, name]) => readGlb(`glb/${name}.glb`))),
     ]);
     gearTable ??= await (await fetch('glb/gear.json')).json();
     if (seq !== character.seq) {
@@ -1627,8 +1997,9 @@ async function loadCharacter(key) {
     if (character.object) {
         character.mixer.stopAllAction();
         character.mixer.uncacheRoot(character.body);
-        modelPivot.remove(character.object);
+        character.object.removeFromParent();
         disposeModel(character.object);
+        disposeTanks();
         character.object = character.body = character.mixer = character.animName = null;
         character.uvProxies = [];
     }
@@ -1642,11 +2013,13 @@ async function loadCharacter(key) {
             part.getObjectByName('Head_Root').matrixWorld.clone().invert().decompose(part.position, part.quaternion, part.scale);
             head.add(part);
         }
-        await wearGear(body, gearGltfs.map((g) => g.scene), sex);
+        await wearGear(body, Object.fromEntries(gearList.map(([kind], i) => [kind, gearGltfs[i].scene])), sex);
         if (seq !== character.seq) return;
         const group = new THREE.Group().add(body);
         body.rotation.y = -Math.PI / 2; // 앞(+Z)이 카메라(-X) 쪽을 보게
         character.box = new THREE.Box3().setFromObject(group);
+        // 스킨 메시 컬링 끔: three는 경계 구를 처음 그릴 때 자세로 한 번만 계산해서, 자세가 크게 바뀌면(게 탱크 탑승 등) 화면 안인데도 얼굴·눈이 잘려 사라짐
+        group.traverse((o) => { if (o.isSkinnedMesh) o.frustumCulled = false; });
         character.object = group;
         character.body = body;
         character.player = CHARACTERS[key][0];
@@ -1663,11 +2036,12 @@ async function loadCharacter(key) {
             if (!entry.materials.includes(o.material)) entry.materials.push(o.material);
         });
         for (const { proxy } of character.uvProxies) body.add(proxy);
-        modelPivot.add(group);
+        characterUser.add(group);
         await setupCharacterPresets(gltfs);
         if (seq !== character.seq) return;
     }
     skinItem.hidden = eyeItem.hidden = !character.object;
+    updateTargetButtons();
     viewPlaced = false; // 캐릭터를 바꾸면 둘 다 보이게 시점을 다시 맞춤
     await loadGlb(lastGlb.path, lastGlb.twoHanded);
 }
@@ -1701,14 +2075,14 @@ function mirrorGeometry(geometry) {
     }
     return g;
 }
-async function wearGear(body, [clothes, bottom, shoes], sex) {
+async function wearGear(body, gear, sex) { // gear: {부위: scene} (characterGear가 null인 부위는 없음)
     const bones = bodyBones(body);
-    for (const scene of [clothes, bottom, shoes]) {
+    for (const [kind, scene] of Object.entries(gear)) {
         const meshes = [];
         scene.traverse((o) => { if (o.isSkinnedMesh) meshes.push(o); });
         for (const mesh of meshes) mesh.bind(new THREE.Skeleton(mesh.skeleton.bones.map((b) => bones.get(b.name).bone), mesh.skeleton.boneInverses), mesh.bindMatrix);
         // 오른발
-        if (scene === shoes) {
+        if (kind === 'shoes') {
             for (const mesh of meshes) {
                 const right = new THREE.SkinnedMesh(mirrorGeometry(mesh.geometry), mesh.material);
                 right.castShadow = right.receiveShadow = true;
@@ -1731,8 +2105,8 @@ async function wearGear(body, [clothes, bottom, shoes], sex) {
         body.add(scene);
     }
     // 몸 가리기 마스크
-    const names = [['clothes', characterGear.clothes], ['bottom', characterGear.bottom], ['shoes', characterGear.shoes]]
-        .map(([kind, id]) => gearTable[kind][id]?.mask[sex]).filter(Boolean);
+    const names = Object.entries(characterGear).filter(([, id]) => id)
+        .map(([kind, id]) => gearTable[kind]?.[id]?.mask[sex]).filter(Boolean);
     const images = await Promise.all(names.map((n) => new Promise((resolve, reject) => {
         const img = new Image();
         img.onload = () => resolve(img);
@@ -1777,10 +2151,15 @@ async function wearGear(body, [clothes, bottom, shoes], sex) {
 //   롤러·붓 등 나머지는 버튼 상태 그대로 (사용자 요청)
 const HOLD_CODES = { Blaster: 'Blst', Brush: 'Brsh', Charger: 'Chrg', Maneuver: 'Mnvr', Roller: 'Rllr', Saber: 'Sber', Shelter: 'Shlt', Shooter: 'Shtr', Slosher: 'Slsh', Spinner: 'Spnr', Stringer: 'Strn' };
 // 스페셜: 게임 WeaponSp* 액터의 ModelInfo가 쓰는 모델 → 캐릭터 대기 동작 WaitHold<코드>. 붙이는 본은 메인과 같게 Weapon_R로 둠 (게임 데이터에 없음, 추정)
-// 게 탱크(Chariot)는 캐릭터가 올라타는 탈것이라 손에 붙이지 않음. 스플래터컬러 스크린·디코이 캐넌은 캐릭터 쪽 대기 동작이 없음.
-// 멀티 미사일·연어알캐넌은 들고 있는 모델이 없음 (액터 ModelInfo 없음)
+// 게 탱크(Chariot)는 올라타는 탈것: 손 대신 탱크 Ride 본을 캐릭터 원점(body)에 겹침 (Ride 본 이름 기준 추정. 캐릭터 어느 본에 붙는지는 게임 데이터 미확인).
+// 스플래터컬러 스크린·디코이 캐넌은 캐릭터 쪽 대기 동작이 없음.
+// 연어알캐넌은 들고 있는 모델이 없음 (액터 ModelInfo 없음). 멀티 미사일은 ModelInfo 대신 MirrorModel(RightFmdb Wsp_Missile):
+//   오른쪽 모델을 Weapon_R에, X 대칭한 것을 Weapon_L에 붙임 (붙이는 본은 메인 양손과 같게 둔 추정)
+const MIRROR_PAIR = /Wsp_Missile\.glb$/;
 const SPECIAL_HOLDS = { JetPackLauncher: 'WaitHoldAir_JetPack', Blower: 'WaitHold_Blower', Shachihoko: 'WaitHold_GHoko', RainCloud: 'WaitHold_RainCloud',
-    SuperStamp: 'WaitHold_SuperStamp', TripleTornadoBeacon: 'WaitHold_TripleTornado', UltraShot: 'WaitHold_UltraShot' };
+    Missile: 'WaitHold_SprMissle', SuperStamp: 'WaitHold_SuperStamp', TripleTornadoBeacon: 'WaitHold_TripleTornado', UltraShot: 'WaitHold_UltraShot', Chariot: 'WaitHold_Chariot',
+    // 샤크라이드: 들기(올라타기) 대기 동작이 없어서 달리기 Skewer_Run을 씀 (추정. 게임은 시작 뒤 바로 달림)
+    SkewerTackle: 'Skewer_Run' };
 const holdAnim = (path) => {
     const code = HOLD_CODES[path.match(/Wmn_([A-Za-z]+)_/)?.[1]];
     return code ? `Shop_Wait_${code}` : SPECIAL_HOLDS[path.match(/Wsp_(\w+)\.glb$/)?.[1]];
@@ -1791,24 +2170,266 @@ holdButton.addEventListener('click', () => {
     viewPlaced = false; // 옆에 세우기 ↔ 들기는 화면 구성이 달라서 시점을 다시 맞춤
     loadGlb(lastGlb.path, lastGlb.twoHanded);
 });
-async function playCharacterAnim(name) {
-    if (!character.mixer || character.animName === name) return;
+// 캐릭터 등 탱크 (사용자 요청): 기본 Tnk_Simple. 무기를 들면 스페셜 전용 탱크, Mr. 베어표 무기 Tnk_Coop, 히어로 슈터 Tnk_MsnLv1
+// 캐릭터 없이 잉크제트를 볼 때는 탱크를 발사기 옆에 같이 둠 (loadGlb)
+const TANK_DEFAULT = 'Tnk_Simple';
+// 스페셜 전용 탱크: 들었을 때만 (내려놓으면 기본 탱크, 사용자 요청). 트리플 토네이도 미사일(TripleTornado)은 전용 탱크 없음
+const TANK_SPECIALS = { JetPackLauncher: 'Tnk_JetPack', Blower: 'Tnk_Blower', TripleTornadoBeacon: 'Tnk_TripleTornado' };
+function tankFor(path, held) {
+    if (!held) return TANK_DEFAULT;
+    const special = TANK_SPECIALS[path.match(/Wsp_(\w+)\.glb$/)?.[1]];
+    if (special) return special;
+    if (/Wmn_\w+_Coop\.glb$/.test(path)) return 'Tnk_Coop';
+    if (HERO_LEVEL.test(path)) return 'Tnk_MsnLv1';
+    return TANK_DEFAULT;
+}
+// 장착: 탱크 스켈레톤은 몸과 같은 본 이름(Spine_3·Tank_Root…)을 써서, 몸에 있는 본은 몸 본에 묶음 (옷과 같은 방식, wearGear).
+// 몸에 없는 본(예: 베어표 Canon_*)과 탱크 애니메이션이 움직이는 본(예: 잉크제트 Tank_Root·pipe·nozle), 그 아래는 탱크 것을 쓰고
+// 원래 부모 이름의 몸 본 아래로 옮겨서 몸을 따라가게 함. 몸 본과 이름이 겹치지 않게 '__tnk'를 붙이고 클립 트랙 이름도 맞춤
+// 들고 있을 때 탱크에 Wait·Warning이 있으면 대기(반복)·폭발(한 번, 끝나면 원래대로) 조작
+const tankWaitInput = document.getElementById('tank-wait');
+const tankWarningButton = document.getElementById('tank-warning');
+async function setTank(name) {
+    if (!character.body || character.tank?.name === name) return;
+    const seq = ++character.tankSeq;
+    const body = character.body;
+    // 한 번 단 탱크는 몸이 바뀔 때까지 떼어 두었다가 다시 붙임 (다시 받지 않게)
+    const cached = character.tankCache.get(name);
+    if (cached) {
+        removeTank();
+        cached.objects.forEach((o, i) => cached.parents[i].add(o));
+        character.tank = cached;
+        return;
+    }
+    const gltf = await readGlb(`glb/${name}.glb`);
+    if (seq !== character.tankSeq || body !== character.body) { disposeModel(gltf.scene); return; }
+    removeTank();
+    const clips = buildClips(gltf); // 머티리얼 트랙은 메시 uuid라 옮기기 전에 만들어도 됨
+    const bones = bodyBones(body);
+    // 탱크 클립의 몸 본 트랙(Root·Spine_3·Clavicle 등의 기준값)은 빼고 몸 애니메이션을 따름. Tank_Root만 탱크가 움직임 (잉크제트 Wait·Warning)
+    for (const clip of clips.values()) clip.tracks = clip.tracks.filter((t) => { const n = t.name.split('.')[0]; return n === 'Tank_Root' || !bones.has(n); });
+    const animated = new Set([...clips.values()].flatMap((clip) => clip.tracks.map((t) => t.name.split('.')[0])));
+    const own = new Set();
+    const meshes = [];
+    gltf.scene.traverse((o) => {
+        if (o.isSkinnedMesh) meshes.push(o);
+        else if (own.has(o.parent) || animated.has(o.name) || (o.isBone && !bones.has(o.name))) own.add(o);
+    });
+    // 몸에 없는 본 사이의 중간 노드(관절이 아닌 Net_1·Rocket_Root_A 등)도 탱크 것으로: 부모가 몸 본이 될 때까지 위로 넓힘
+    for (const o of [...own].filter((n) => !own.has(n.parent))) {
+        let top = o;
+        while (!bones.has(top.parent.name)) top = top.parent;
+        top.traverse((c) => { if (!c.isSkinnedMesh) own.add(c); });
+    }
+    const tops = [...own].filter((o) => !own.has(o.parent));
+    const renamed = new Set([...own].map((o) => o.name));
+    for (const o of own) o.name += '__tnk';
+    for (const clip of clips.values()) {
+        for (const t of clip.tracks) {
+            const dot = t.name.indexOf('.');
+            if (renamed.has(t.name.slice(0, dot))) t.name = `${t.name.slice(0, dot)}__tnk${t.name.slice(dot)}`;
+        }
+    }
+    // 끈 규격 메시: 옷 두께(GEAR_TANK_FIT)와 성별에 맞는 것만 보이고, 나머지 메시는 늘 보임 (사용자 요청). 게임에서 기본 숨김인 메시(*_Hide)는 숨김
+    const fit = GEAR_TANK_FIT + (character.sex === 'F' ? 'F' : '');
+    for (const mesh of meshes) {
+        const size = mesh.name.match(/^(?:Carabiner|Belt_Under|Belt_EndStop_L)_(L|LF|M|MF|S|SF)_low__/)?.[1];
+        mesh.visible = !mesh.userData.s3?.hidden && (size === undefined || size === fit);
+    }
+    for (const mesh of meshes) {
+        mesh.bind(new THREE.Skeleton(mesh.skeleton.bones.map((b) => own.has(b) ? b : bones.get(b.name).bone), mesh.skeleton.boneInverses), mesh.bindMatrix);
+        mesh.frustumCulled = false; // 경계 구가 바인드 자리라 몸과 같이 움직이면 잘림 (캐릭터 메시와 같은 이유)
+    }
+    const holder = new THREE.Group().add(...meshes); // 메시 자리는 스키닝에 영향 없음 (bindMode attached)
+    body.add(holder);
+    for (const top of tops) bones.get(top.parent.name).bone.add(top); // 원래 부모와 같은 이름의 몸 본 아래, 로컬 값 그대로
+    const mixer = new THREE.AnimationMixer(body);
+    const action = (clipName, once) => {
+        const clip = clips.get(clipName);
+        if (!clip) return null;
+        const a = mixer.clipAction(clip);
+        if (once) a.setLoop(THREE.LoopOnce); // 끝나면 원래 자세·색으로 (clampWhenFinished 끔)
+        return a;
+    };
+    const objects = [holder, ...tops];
+    const start = TANK_START[name] ? action(TANK_START[name], true) : null;
+    if (start) start.clampWhenFinished = true; // 끝 자세 유지 (로켓이 날아간 뒤)
+    character.tank = { name, objects, parents: objects.map((o) => o.parent), mixer, wait: action('Wait'), warning: action('Warning', true), start };
+    character.tankCache.set(name, character.tank);
+}
+function removeTank() { // 떼기만 함 (tankCache). 해제는 몸이 바뀔 때 (disposeTanks)
+    const tank = character.tank;
+    if (!tank) return;
+    tank.mixer.stopAllAction();
+    for (const o of tank.objects) o.removeFromParent();
+    character.tank = null;
+}
+function disposeTanks() {
+    for (const tank of character.tankCache.values()) for (const o of tank.objects) disposeModel(o);
+    character.tankCache.clear();
+    character.tank = null;
+}
+// 시작 동작이 있는 탱크: 멜 때 첫 프레임에 고정하고, 시작 버튼을 누르면 끝까지 재생 (트리플 토네이도, 사용자 요청)
+const TANK_START = { Tnk_TripleTornado: 'Sp_Start_TripleTornado_Tnk' };
+const tankStartButton = document.getElementById('tank-start');
+tankStartButton.addEventListener('click', () => {
+    const { start } = character.tank;
+    start.reset().play();
+});
+// 탱크를 멜 때의 기본 상태 (사용자 요청): checked는 대기 체크박스를 켠 채로, pose는 체크박스 없이 늘 Wait 자세 (베어표 탱크 Wait = 1프레임 기준 자세)
+const TANK_WAIT_DEFAULT = { Tnk_Blower: 'checked', Tnk_JetPack: 'checked', Tnk_Coop: 'pose' };
+function updateTankControls() {
+    const held = heldParts.length > 0;
+    const tank = character.tank;
+    const mode = tank?.wait && TANK_WAIT_DEFAULT[tank.name];
+    tankWaitInput.parentElement.hidden = !(held && tank?.wait) || mode === 'pose';
+    tankWarningButton.hidden = !(held && tank?.warning);
+    tankStartButton.hidden = !(held && tank?.start);
+    tankWaitInput.checked = held && mode === 'checked';
+    tank?.mixer.stopAllAction();
+    if (mode === 'pose' || tankWaitInput.checked) tank.wait.reset().play();
+    if (tank?.start) {
+        tank.start.reset().play();
+        tank.start.paused = true; // 첫 프레임에 고정
+        tank.mixer.update(0);
+    }
+}
+tankWaitInput.addEventListener('change', () => {
+    const { wait } = character.tank;
+    if (tankWaitInput.checked) wait.reset().play();
+    else wait.stop();
+});
+tankWarningButton.addEventListener('click', () => {
+    const { wait, warning } = character.tank;
+    wait?.stop();
+    tankWaitInput.checked = false;
+    warning.reset().play();
+});
+// 들고 있을 때 캐릭터만 움직이는 조작 (무기 모델에 애니메이션이 없는 스페셜, 사용자 요청). {모델: { shoot, loop }}
+// - shoot: 발사 버튼. 이어서 한 번씩 재생할 캐릭터 동작. 끝나면 들기 대기 동작으로 CHR_SHOOT_RETURN초에 걸쳐 섞어서 돌아감
+//   (자세만. 눈꺼풀 텍스처 패턴은 바로 대기 동작 것으로). 반복 체크박스는 끔
+// - loop: 반복 체크박스 (흡입). 켜면 이 동작을 반복, 끄면 들기 대기로
+// 멀티 미사일: WaitShoot_SprMissle은 3번 반복 (사용자 요청). 흡입기: 흡입 WaitShoot_Blower 반복, 발사 WaitShoot2_Blower. 잉크제트: 발사 Shoot_JetPack
+const CHR_ACTIONS = {
+    Wsp_Missile: { shoot: ['WaitShoot_SprMissle_St', 'WaitShoot_SprMissle', 'WaitShoot_SprMissle', 'WaitShoot_SprMissle', 'Reload_SprMissle'] },
+    Wsp_Blower: { loop: 'WaitShoot_Blower', shoot: ['WaitShoot2_Blower'] },
+    Wsp_JetPackLauncher: { shoot: ['Shoot_JetPack'] },
+};
+const CHR_SHOOT_RETURN = 5 / 60;
+const chrAction = () => CHR_ACTIONS[lastGlb.path.match(/([^/]+)\.glb$/)[1]];
+const chrLoopInput = document.getElementById('chr-loop');
+chrLoopInput.addEventListener('change', () => playCharacterAnim(chrLoopInput.checked ? chrAction().loop : holdAnim(lastGlb.path)));
+// 이 캐릭터 동작 동안 손에 든 무기를 투명하게 사라지게 함 (동작 시각 비율만큼, 사용자 요청. 게임 데이터 아님). 동작이 끝나면 바로 원래대로
+const CHR_SHOOT_FADE = { Reload_SprMissle: true };
+const heldFadeSaved = new Map(); // 사라지게 하는 동안 바꾼 머티리얼 → 원래 { transparent, opacity }
+function applyHeldFade() {
+    const action = character.action;
+    const fading = heldParts.length && action && CHR_SHOOT_FADE[action.getClip().name];
+    if (!fading) {
+        for (const [material, saved] of heldFadeSaved) {
+            material.transparent = saved.transparent;
+            material.opacity = saved.opacity;
+            material.needsUpdate = true;
+        }
+        heldFadeSaved.clear();
+        return;
+    }
+    const k = 1 - Math.min(action.time / action.getClip().duration, 1);
+    for (const part of heldParts) {
+        part.traverse((obj) => {
+            if (!obj.isMesh) return;
+            const material = obj.material;
+            if (!heldFadeSaved.has(material)) {
+                heldFadeSaved.set(material, { transparent: material.transparent, opacity: material.opacity });
+                material.transparent = true;
+                material.needsUpdate = true;
+            }
+            material.opacity = heldFadeSaved.get(material).opacity * k;
+        });
+    }
+}
+const chrShootButton = document.getElementById('chr-shoot');
+chrShootButton.addEventListener('click', () => {
+    const [first, ...rest] = chrAction().shoot;
+    chrLoopInput.checked = false;
+    playCharacterAnim(first, { once: true, then: [...rest, holdAnim(lastGlb.path)], endFade: CHR_SHOOT_RETURN });
+});
+// once: 한 번만 재생하고 끝 자세 유지 (같은 이름이어도 처음부터 다시). then: 끝나면 이어서 재생할 동작 (목록이면 앞에서부터 한 번씩, 마지막은 반복)
+// endFade: 마지막 반복 동작으로 넘어갈 때 앞 동작에서 섞어 넘어가는 시간(초). 0이면 바로 바꿈
+async function playCharacterAnim(name, { once = false, then = null, endFade = 0 } = {}) {
+    // 같은 동작이 이미 반복 중이면 그대로 (한 번 재생으로 끝난 같은 동작을 이어서 반복할 때는 다시 틂. 예: 샤크라이드 Skewer_Run 한 번 → 반복)
+    if (!character.mixer || (character.animName === name && !once && character.action?.loop === THREE.LoopRepeat)) return;
     character.animName = name;
     const seq = ++character.animSeq;
     character.animIndex ??= await (await fetch('glb/anim/index.json')).json();
     const file = character.animIndex[character.player][name];
     if (!character.clips.has(file)) character.clips.set(file, characterClip(await new GLTFLoader().loadAsync(`glb/anim/${file}`)));
     if (seq !== character.animSeq || !character.mixer) return;
-    character.mixer.stopAllAction();
-    character.mixer.clipAction(character.clips.get(file)).play();
+    const prev = character.action;
+    ensureSscNodes(character.clips.get(file));
+    const action = character.mixer.clipAction(character.clips.get(file));
+    const fade = once ? 0 : endFade;
+    if (!(fade > 0 && prev && prev !== action)) character.mixer.stopAllAction();
+    action.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat);
+    action.clampWhenFinished = once;
+    character.action = action.reset().play();
+    if (fade > 0 && prev && prev !== action) action.crossFadeFrom(prev, fade, false);
+    if (once && then) {
+        const mixer = character.mixer;
+        const [next, ...rest] = [then].flat();
+        const onFinished = (e) => {
+            if (e.action !== action) return;
+            mixer.removeEventListener('finished', onFinished);
+            // mixer.update 도중(finished 이벤트)이라 바로 바꾸면 stopAllAction이 update 중인 액션 목록을 건드림 → update가 끝난 뒤
+            if (character.action === action) queueMicrotask(() => { if (character.action === action) playCharacterAnim(next, rest.length ? { once: true, then: rest, endFade } : { endFade }); });
+        };
+        mixer.addEventListener('finished', onFinished);
+    }
     character.mixer.update(0); // 일시정지 중이어도 첫 프레임 자세로
     applyCharacterUv();
+    applyCharacterPatterns();
+    applyHeldFade();
+}
+// 동작의 텍스처 패턴 (게임 텍스처 패턴 애니메이션): 동작이 정한 텍스처로 바꿔 끼우고, 안 정한 샘플러는 모델 기본 텍스처로. 매 프레임 동작 시각으로 고름
+// 예: 울트라 샷 WaitHold_UltraShot·Shoot_UltraShot은 M_Eyelids _a0·_o0을 Alb.1·Opa.4로 (한쪽 눈 감기), Shop_Wait_*는 _o0 Opa.0→1→2→3→0 (눈 깜빡임)
+// 값: 텍스처 이름(상수) 또는 {times, textures} (그 시각부터 다음 키까지 그 텍스처). 텍스처는 setupCharacterPresets에서 미리 받아 둠
+function applyCharacterPatterns() {
+    const patterns = character.action?.getClip().userData.texPatterns ?? {};
+    const time = character.action?.time ?? 0;
+    for (const { material, slots } of charPreset.patternMats) {
+        for (const [sampler, { slot, byName, fallback }] of Object.entries(slots)) {
+            const p = patterns[material.name]?.[sampler];
+            let name = fallback;
+            if (typeof p === 'string') name = p;
+            else if (p) for (let i = 0; i < p.times.length && p.times[i] <= time; i++) name = p.textures[i];
+            const tex = byName.get(name);
+            if (material[slot] === tex) continue;
+            material[slot] = tex;
+            // 정적 tex_mtx0은 텍스처 객체의 repeat·offset에 들어 있어서 새 텍스처에도 다시 (눈꺼풀은 세로 2배, setUvTransform)
+            const srt = material.userData.texSrt?.[0];
+            if (srt) setUvTransform(material, 0, ...srt.translate);
+        }
+    }
 }
 // 애니메이션 glb의 셰이더 파라미터 커브(extras.s3.param_anims, tools/build_player_anims.py): 지금은 M_Eye tex_mtx0 이동 = 눈동자 이동뿐
 // 트랙은 머티리얼 이름별 proxy(character.uvProxies)의 position에 걸고 매 프레임 applyCharacterUv가 텍스처 오프셋으로 옮김
 // 캐릭터마다 몸 glb가 달라서 proxy 이름(s3uv_<머티리얼>)으로 트랙을 묶음 (클립은 캐릭터끼리 공유)
+// 동작 glb의 '<본>_SSC' 트랙: 부모 스케일을 되돌리는 노드 (build_glb.compensate_segment_scale). 몸 glb에는 이 노드가 없어서
+// 처음 쓸 때 부모와 그 본 사이에 끼움. 없으면 SSC 본이 부모 스케일을 물려받아 팔이 겹쳐 늘어남 (울트라 스탬프 Return_SuperStamp)
+function ensureSscNodes(clip) {
+    for (const t of clip.tracks) {
+        const name = t.name.slice(0, t.name.indexOf('.'));
+        if (!name.endsWith('_SSC') || character.body.getObjectByName(name)) continue;
+        const bone = character.body.getObjectByName(name.slice(0, -'_SSC'.length));
+        const node = new THREE.Object3D();
+        node.name = name;
+        bone.parent.add(node);
+        node.add(bone);
+    }
+}
 function characterClip(gltf) {
     const clip = gltf.animations[0];
+    clip.userData.texPatterns = gltf.parser.json.animations[0].extras?.s3?.tex_patterns ?? {};
     for (const [material, tracks] of Object.entries(gltf.parser.json.animations[0].extras?.s3?.param_anims ?? {})) {
         for (const t of tracks) {
             if (t.param === 'tex_mtx0' && t.target in UV_TARGETS) clip.tracks.push(new THREE.NumberKeyframeTrack(`s3uv_${material}.position[${UV_TARGETS[t.target]}]`, t.times, t.values));
@@ -1825,7 +2446,8 @@ function applyCharacterUv() {
         }
     }
 }
-function holdWeapons(scenes, path, clipSets) {
+// hold: { pos: [x, y, z], rot: [x, y, z] (도) } 무기 모델 좌표에서 손 본에 겹칠 점·방향 (Root 본 대신). 본 없는 모델(먹구름)용 눈대중 값
+function holdWeapons(scenes, path, clipSets, scale = 1, hold = null) {
     clipSets.forEach((clips, i) => {
         const shop = clips.get(holdAnim(path));
         if (!shop) return;
@@ -1840,15 +2462,42 @@ function holdWeapons(scenes, path, clipSets) {
         else for (const scene of scenes) scene.traverse((o) => { if (o.isMesh && shelterPart(o)) o.visible = shelterPart(o) !== 'Umbrella_Open'; });
     }
     scenes.forEach((scene, i) => {
-        const bone = character.body.getObjectByName(i === 1 || path.includes('Wmn_Stringer_') ? 'Weapon_L' : 'Weapon_R');
+        const ride = path.includes('Wsp_Chariot') ? scene.getObjectByName('Ride') : null;
+        // 샤크라이드: 무기 Root를 캐릭터 몸 원점에 둠 (플레이어 Skewer_* 동작이 무기 클립과 같은 원점 기준이라고 봄, 추정). 몸은 무기를 안 따라감
+        const mount = !ride && path.includes('Wsp_SkewerTackle') ? scene.getObjectByName('Root') : null;
+        // 탈것: 탱크는 캐릭터 묶음(character.object)에 두고, 매 프레임 캐릭터 몸을 Ride 본에 맞춤(followRide). 탱크 Wait가 Skl_Root(Ride 부모)를 흔들어서 몸도 같이 움직여야 함
+        const bone = ride || mount ? character.object : character.body.getObjectByName(i === 1 || path.includes('Wmn_Stringer_') ? 'Weapon_L' : 'Weapon_R');
         scene.updateMatrixWorld(true);
-        const m = (scene.getObjectByName('Root') ?? scene).matrixWorld.clone().invert(); // Root 본이 없으면(먹구름) 모델 원점
+        const m = (ride ?? scene.getObjectByName('Root') ?? scene).matrixWorld.clone().invert(); // Root 본이 없으면(먹구름) 모델 원점
+        if (hold) {
+            const anchor = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...hold.rot.map(THREE.MathUtils.degToRad)));
+            anchor.setPosition(...hold.pos);
+            m.premultiply(anchor.invert());
+        }
         if (i === 1) m.premultiply(new THREE.Matrix4().makeRotationX(Math.PI));
+        if (i === 1 && MIRROR_PAIR.test(path)) m.multiply(new THREE.Matrix4().makeScale(-1, 1, 1)); // _L 파일 대신 모델 좌표에서 X 대칭
+        if (scale !== 1) m.premultiply(new THREE.Matrix4().makeScale(scale, scale, scale));
+        if (ride || mount) {
+            character.body.updateMatrix();
+            m.premultiply(character.body.matrix); // 바인드에서 Ride = 지금 몸 위치
+        }
+        if (ride) {
+            character.ride = { bone: ride, body: character.body, rest: character.body.matrix.clone() };
+        }
         m.decompose(scene.position, scene.quaternion, scene.scale);
+        if (ride || mount) scene.traverse((o) => { if (o.isSkinnedMesh) o.frustumCulled = false; }); // 위 캐릭터와 같은 이유 (탱크가 몸과 같이 크게 움직임)
         bone.add(scene);
         heldParts.push(scene);
     });
-    placeHeld();
+    // 탈것은 캐릭터보다 커서 시점을 탱크까지 포함해 맞춤
+    if (path.includes('Wsp_Chariot')) {
+        const parent = character.object.parent; // character.box처럼 부모(시점·사용자 회전) 없이 잼
+        parent.remove(character.object);
+        character.object.updateMatrixWorld(true);
+        const box = new THREE.Box3().setFromObject(character.object);
+        parent.add(character.object);
+        placeHeld(box);
+    } else placeHeld();
 }
 
 // 피부·눈 색 프리셋: 게임 Color_Skin(셰이더 파라미터, 9프레임)·Color_Eye(M_Eye 알베도 텍스처 패턴, 21프레임) 애니메이션의 프레임 하나를 고정 적용
@@ -1857,7 +2506,7 @@ function holdWeapons(scenes, path, clipSets) {
 //   const_color1은 투과광을 안 넣는 뷰어(06_roadmap 6.3)에선 쓸 데가 없어서 안 바꿈
 // - 견본 색은 보기용: 얼굴 알베도 위쪽(이마) 평균 × const_color0 (MAi 맵은 안 곱함). 눈 견본은 텍스처 그림 그대로
 // 고른 번호는 캐릭터를 바꿔도 유지. 피부는 처음엔 모델 기본값(bfres 값이라 프리셋 프레임과 조금 다름)
-const charPreset = { skin: null, eye: 0, skinMats: [], eyeMats: [], skinDefault: '' };
+const charPreset = { skin: null, eye: 0, skinMats: [], eyeMats: [], patternMats: [], skinDefault: '' };
 const skinItem = document.getElementById('skin-item');
 const eyeItem = document.getElementById('eye-item');
 const skinButton = document.getElementById('skin-button');
@@ -1918,13 +2567,27 @@ async function setEyePreset(index) {
 async function setupCharacterPresets(gltfs) {
     charPreset.skinMats = [];
     charPreset.eyeMats = [];
+    charPreset.patternMats = [];
     for (const { scene, parser } of gltfs) {
         scene.traverse((o) => {
             if (!o.isMesh) return;
             const presets = o.material.userData.s3?.presets;
             if (presets?.skin && !charPreset.skinMats.includes(o.material)) charPreset.skinMats.push(o.material);
             if (presets?.eye && !charPreset.eyeMats.some((e) => e.material === o.material)) charPreset.eyeMats.push({ material: o.material, parser });
+            if (o.material.userData.s3?.tex_patterns && !charPreset.patternMats.some((e) => e.material === o.material)) charPreset.patternMats.push({ material: o.material, parser });
         });
+    }
+    // 텍스처 패턴용 텍스처를 미리 받음: {머티리얼 샘플러: {slot(three.js 맵 이름), byName(이름 → 텍스처), fallback(모델 기본 텍스처 이름)}}
+    for (const entry of charPreset.patternMats) {
+        const { textures, tex_patterns } = entry.material.userData.s3;
+        entry.slots = {};
+        for (const [sampler, { shader, textures: list }] of Object.entries(tex_patterns)) {
+            const loaded = await Promise.all(list.map((t) => entry.parser.getDependency('texture', t.index)));
+            if (shader === '_a0') for (const tex of loaded) tex.colorSpace = THREE.SRGBColorSpace;
+            entry.slots[sampler] = { slot: shader === '_a0' ? 'map' : Object.keys(S3_MAPS).find((k) => S3_MAPS[k] === shader),
+                byName: new Map(list.map((t, i) => [t.name, loaded[i]])), fallback: textures[shader].name };
+        }
+        delete entry.parser;
     }
     // 견본은 얼굴 머티리얼 기준 (몸·얼굴 프레임 값이 같음)
     const face = charPreset.skinMats.find((m) => m.name === 'M_Face') ?? charPreset.skinMats[0];
@@ -2671,10 +3334,34 @@ function renderFrame() {
 // 애니메이션 일시정지: 모든 무기군 공통. 시간만 멈추고 버튼·슬라이더(차지 등)는 그대로 동작
 let animPaused = false;
 const pauseButton = document.getElementById('anim-pause');
-pauseButton.addEventListener('click', () => {
-    animPaused = !animPaused;
+function setAnimPaused(paused) {
+    animPaused = paused;
     setText(pauseButton, animPaused ? 'anim.play' : 'anim.pause');
+}
+pauseButton.addEventListener('click', () => setAnimPaused(!animPaused));
+// 1프레임 넘기기 (사용자 요청): 일시정지하고 게임 1프레임(1/60초)만큼 진행
+document.getElementById('anim-step').addEventListener('click', () => {
+    setAnimPaused(true);
+    advanceAnim(1 / 60);
 });
+// 무기·캐릭터 애니메이션을 dt초 진행 (animate 루프와 1프레임 넘기기가 같이 씀)
+function advanceAnim(dt) {
+    if (character.mixer) {
+        character.mixer.update(dt);
+        character.tank?.mixer.update(dt);
+        applyCharacterUv();
+        applyCharacterPatterns();
+        applyHeldFade();
+    }
+    if (mixers.length) {
+        s3Time.value += dt;
+        for (const m of mixers) m.update(dt);
+        syncHeldLoops();
+        followRide();
+        wsCheckResets();
+        applyUvProxies();
+    }
+}
 
 // 저장 (PNG·GIF·WebP, 화면은 export.js): 지금 셰이더·투영 그대로, 캔버스 크기로, 배경은 투명하게, 회전 기즈모는 빼고 그림
 // 배경(scene.background)만 빼면 렌더러(alpha: true)가 투명하게 지움. 픽셀·카툰은 렌더 타겟의 알파가 그대로 화면까지 옴, 선화는 lineMaterial.clear로 배경 칠을 끔
@@ -2714,13 +3401,35 @@ document.getElementById('save-png').addEventListener('click', () => {
 const REC_MAX_BYTES = 1.5e9;
 const recFps = document.getElementById('rec-fps');
 const recLength = document.getElementById('rec-length');
+// 길이 단위: 초 또는 프레임. 프레임은 게임 프레임(1/60초, 애니메이션 프레임과 같은 단위)이라 녹화 fps와 상관없이 60프레임 = 1초
+const recUnit = document.getElementById('rec-unit');
+const REC_GAME_FPS = 60;
+const recSeconds = () => recLength.valueAsNumber / (recUnit.value === 'frame' ? REC_GAME_FPS : 1);
+function setRecSeconds(sec) {
+    recLength.value = recUnit.value === 'frame' ? String(Math.round(sec * REC_GAME_FPS)) : sec.toFixed(2);
+}
+function updateRecUnit() {
+    const frame = recUnit.value === 'frame';
+    recLength.min = frame ? '1' : '0.1';
+    recLength.max = String(frame ? 60 * REC_GAME_FPS : 60);
+    recLength.step = frame ? '1' : '0.1';
+}
+let recUnitPrev = recUnit.value;
+recUnit.addEventListener('change', () => {
+    // 단위를 바꿔도 길이는 그대로 (3초 ↔ 180프레임)
+    const sec = recLength.valueAsNumber / (recUnitPrev === 'frame' ? REC_GAME_FPS : 1);
+    recUnitPrev = recUnit.value;
+    updateRecUnit();
+    if (Number.isFinite(sec)) setRecSeconds(sec);
+});
+updateRecUnit();
 const recTurn = document.getElementById('rec-turn');
 const recButton = document.getElementById('rec-start');
 let recording = null; // { fps, step, acc, frames, bytes, total, width, height, smooth }
 function startRecording() {
     const fps = Number(recFps.value);
     const { width, height } = renderer.domElement;
-    recording = { fps, step: 1 / fps, acc: 1 / fps, frames: [], bytes: 0, total: Math.max(1, Math.round(recLength.valueAsNumber * fps) || 1), width, height, smooth: !pixelMode };
+    recording = { fps, step: 1 / fps, acc: 1 / fps, frames: [], bytes: 0, total: Math.max(1, Math.round(recSeconds() * fps) || 1), width, height, smooth: !pixelMode };
     recButton.classList.add('recording');
     setText(recButton, 'export.stop');
 }
@@ -2751,7 +3460,7 @@ function updateRecTurn() { recTurn.hidden = !autoRotate; }
 autoButton.addEventListener('click', updateRecTurn);
 updateRecTurn();
 recTurn.addEventListener('click', () => {
-    recLength.value = (2 * Math.PI / (AUTO_ROTATE_SPEED * speedSlider.valueAsNumber)).toFixed(2);
+    setRecSeconds(2 * Math.PI / (AUTO_ROTATE_SPEED * speedSlider.valueAsNumber));
 });
 
 // 5. 애니메이션 루프
@@ -2769,24 +3478,40 @@ function animate(timestamp) {
         dt = recording.step;
     }
     if (autoRotate) {
-        modelPivot.quaternion.premultiply(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * speedSlider.valueAsNumber * dt));
+        rotateTargetWorld(autoRotateQuat.setFromAxisAngle(WORLD_UP, AUTO_ROTATE_SPEED * speedSlider.valueAsNumber * dt));
         showRotation();
     }
-    if (character.mixer && !animPaused) {
-        character.mixer.update(dt);
-        applyCharacterUv();
-    }
-    if (mixers.length && !animPaused) {
-        s3Time.value += dt;
-        for (const m of mixers) m.update(dt);
-        wsCheckResets();
-        applyUvProxies();
-    }
+    if (!animPaused) advanceAnim(dt);
     controls.update(); // 컨트롤러 업데이트
     if (recording) captureFrame();
     else renderFrame();
 }
 animate();
+// 올라탄 게 탱크의 반복 애니메이션을 캐릭터 동작과 같은 시간으로 맞춤. 길이가 같은 클립만
+// (게 탱크 Wait·Walk*·Turn ↔ 캐릭터 WaitHold_Chariot 모두 34프레임). 반복을 껐다 켜도 캐릭터 박자에 다시 맞음
+// 탈것 Ride 본(애니메이션 적용 후)을 캐릭터 묶음 기준으로 구해서 몸 위치·회전으로 씀
+const rideMatrix = new THREE.Matrix4();
+function followRide() {
+    const ride = character.ride;
+    if (!ride || ride.body !== character.body) return;
+    ride.bone.updateWorldMatrix(true, false);
+    rideMatrix.copy(character.object.matrixWorld).invert().multiply(ride.bone.matrixWorld);
+    rideMatrix.decompose(ride.body.position, ride.body.quaternion, ride.body.scale);
+}
+function syncHeldLoops() {
+    const lead = character.action;
+    if (!character.ride || !lead?.isRunning()) return; // 지금은 게 탱크만 (사용자 요청)
+    const duration = lead.getClip().duration;
+    let synced = false;
+    for (const control of wsControls) {
+        for (const action of control.actions) {
+            if (!action.isRunning() || action.loop !== THREE.LoopRepeat || Math.abs(action.getClip().duration - duration) > 1e-3) continue;
+            action.time = lead.time;
+            synced = true;
+        }
+    }
+    if (synced) mixers[0].update(0);
+}
 
 // 우측 패널 묶음(셰이더·저장·조명·회전)을 하단 바(카테고리 바) 바로 위에 둠. 패널 높이가 바뀌어도 위로만 늘어나서 하단 바와 안 겹치고,
 // 화면 위쪽 여백(20px)을 넘지 않게 max-height를 걸어 둠 (넘치면 셰이더 패널만 줄어듦)
@@ -3048,51 +3773,56 @@ const weaponData = [
             {file: 'Coop', img: 'Path_Wst_Saber_Bear.png'},
         ] },
     // 서브·스페셜: 모델 파일은 '<prefix>_<file>' (무기군 이름이 안 들어감). 어느 서브·스페셜인지는 게임 Actor pack이 쓰는 모델로 확인
+    // scale: 모델 배율. 사용자 눈대중 (게임 근거 없음. romfs에 서브 스케일 값 없고, exefs ModelInfo DebugModelScale 적용 함수 미확인)
     { id: 'Sub', prefix: 'Wsb', img: 'IconTypeWpn_11.png',
         items: [
-            {file: 'Bomb_Throw', img: 'Dummy.png'},
-            {file: 'Bomb_Throw_Msn', img: 'Dummy.png'},
-            {file: 'Bomb_Hold', img: 'Dummy.png'},
-            {file: 'Bomb_Handy', img: 'Dummy.png'},
-            {file: 'Bomb_Handy_Msn', img: 'Dummy.png'},
-            {file: 'Sprinkler', img: 'Dummy.png'},
-            {file: 'Shield', img: 'Dummy.png'},
-            {file: 'Bomb_Piyo', img: 'Dummy.png'},
-            {file: 'Bomb_Curling', img: 'Dummy.png'},
-            {file: 'Bomb_Curling_Msn', img: 'Dummy.png'},
-            {file: 'Bomb_Curling_Rvl', img: 'Dummy.png'},
-            {file: 'Bomb_Robo', img: 'Dummy.png'},
-            {file: 'Flag', img: 'Dummy.png'},
-            {file: 'MarkingBall', img: 'Dummy.png'},
-            {file: 'DevilBall', img: 'Dummy.png'},
-            {file: 'LineMarker', img: 'Dummy.png'},
-            {file: 'Bomb_Tako', img: 'Dummy.png'},
+            // variants: 같은 서브의 변종 모델 (_Msn 히어로, _Rvl 옥타링). 목록엔 기본만 두고 애니메이션 바 메뉴로 고름
+            {file: 'Bomb_Throw', img: 'Wsb_Bomb_Splash.png', scale: 1, variants: ['_Msn']},
+            {file: 'Bomb_Hold', img: 'Wsb_Bomb_Suction.png', scale: 1},
+            {file: 'Bomb_Handy', img: 'Wsb_Bomb_Quick.png', scale: 1, variants: ['_Msn']},
+            {file: 'Sprinkler', img: 'Wsb_Sprinkler.png', scale: 1},
+            {file: 'Shield', img: 'Wsb_Shield.png', scale: 1},
+            {file: 'Bomb_Piyo', img: 'Wsb_Bomb_Fizzy.png', scale: 1},
+            {file: 'Bomb_Curling', img: 'Wsb_Bomb_Curling.png', scale: 1, variants: ['_Msn', '_Rvl']},
+            {file: 'Bomb_Robo', img: 'Wsb_Bomb_Robot.png', scale: 1},
+            {file: 'Flag', img: 'Wsb_Beacon.png', scale: 1},
+            {file: 'MarkingBall', img: 'Wsb_PointSensor.png', scale: 1},
+            {file: 'DevilBall', img: 'Wsb_PoisonMist.png', scale: 1},
+            {file: 'LineMarker', img: 'Wsb_LineMarker.png', scale: 1},
+            {file: 'Bomb_Tako', img: 'Wsb_Bomb_Torpedo.png', scale: 1},
+            // 잉크 마인: 게임엔 전용 모델이 없음 (BulletTrap 액터에 ModelInfo 없이 이펙트만). 로커 피규어 Fig_Trap(LObj_Wsb_Trap)으로 대신 (사용자 요청)
+            {file: 'Trap', img: 'Wsb_Trap.png', model: 'Fig_Trap'},
         ] },
+    // scale: 모델 배율 (서브와 같음). 울트라 착지 0.5는 사용자 눈대중 (게임 근거 없음)
     { id: 'Special', prefix: 'Wsp', img: 'IconTypeWpn_12.png',
         items: [
-            {file: 'UltraShot', img: 'Dummy.png'},
-            {file: 'GreatBarrier', img: 'Dummy.png'},
-            {file: 'GreatBarrier_Drone', img: 'Dummy.png'},
-            {file: 'Missile', img: 'Dummy.png'},
-            {file: 'RainCloud', img: 'Dummy.png'},
-            {file: 'ShockSonar', img: 'Dummy.png'},
-            {file: 'Blower', img: 'Dummy.png'},
-            {file: 'MicroLaserBit', img: 'Dummy.png'},
-            {file: 'JetPackLauncher', img: 'Dummy.png'},
-            {file: 'SuperStamp', img: 'Dummy.png'},
-            {file: 'Chariot', img: 'Dummy.png'},
-            {file: 'SkewerTackle', img: 'Dummy.png'},
-            {file: 'TripleTornadoBeacon', img: 'Dummy.png'},
-            {file: 'TripleTornado', img: 'Dummy.png'},
-            {file: 'EnergyStand', img: 'Dummy.png'},
-            {file: 'FireworkPipe', img: 'Dummy.png'},
-            {file: 'FireworkBomb', img: 'Dummy.png'},
-            {file: 'Pogo_R', img: 'Dummy.png'},
-            {file: 'Chimney', img: 'Dummy.png'},
-            {file: 'ChimneyWall', img: 'Dummy.png'},
-            {file: 'Shachihoko', img: 'Path_Wsp_Shachihoko.png'},
+            {file: 'UltraShot', img: 'Wsp_SpUltraShot.png', scale: 1},
+            // 캐릭터와 같이 둘 때 배치: 사용자가 화면에서 맞춘 값 (게임 근거 없음)
+            {file: 'GreatBarrier', img: 'Wsp_SpGreatBarrier.png', scale: 1, layout: { weapon: { pos: [0, 0, 0], rot: [0, -90, 0] }, chr: { pos: [1.0, -1.367, 0] } }},
+            //{file: 'GreatBarrier_Drone', img: 'Wsp_SpGreatBarrier.png', scale: 1},
+            {file: 'Missile', img: 'Wsp_SpMultiMissile.png', scale: 1},
+            // hold: 손에 드는 기준점 (본이 없는 모델). 게임 화면 보고 맞춘 눈대중 값 (게임 데이터 근거 없음)
+            {file: 'RainCloud', img: 'Wsp_SpInkStorm.png', hold: { pos: [-0.4, 0.1, -0.37], rot: [-30, -14.7, -2.8] }, scale: 1},
+            {file: 'ShockSonar', img: 'Wsp_SpShockSonar.png', scale: 1},
+            {file: 'Blower', img: 'Wsp_SpBlower.png', scale: 1},
+            {file: 'MicroLaserBit', img: 'Wsp_SpMicroLaser.png', scale: 1, layout: { weapon: { rot: [0, -90, 0] } }},
+            {file: 'JetPackLauncher', img: 'Wsp_SpJetpack.png', scale: 1},
+            {file: 'SuperStamp', img: 'Wsp_SpUltraStamp.png', scale: 1},
+            {file: 'Chariot', img: 'Wsp_SpChariot.png', scale: 1},
+            {file: 'SkewerTackle', img: 'Wsp_SpSkewer.png', scale: 1},
+            {file: 'TripleTornadoBeacon', img: 'Wsp_SpTripleTornado.png', scale: 0.33},
+            {file: 'TripleTornado', img: 'Wsp_SpTripleTornado.png', scale: 1},
+            {file: 'EnergyStand', img: 'Wsp_SpEnergyStand.png', scale: 0.75},
+            {file: 'FireworkPipe', img: 'Wsp_SpFirework.png', scale: 1},
+            {file: 'FireworkBomb', img: 'Wsp_SpFirework.png', scale: 1},
+            {file: 'Pogo_R', img: 'Wsp_SpPogo.png', scale: 0.5},
+            {file: 'Chimney', img: 'Wsp_SpChimney.png', scale: 1},
+            {file: 'ChimneyWall', img: 'Wsp_SpChimney.png', scale: 1},
+            {file: 'Shachihoko', img: 'Wsp_SpGachihoko.png', scale: 1},
         ] }
 ];
+// 서브 변종 메뉴 (wsbVariant): {Wsb_<기본 모델>: [변종 접미사]}
+const wsbVariants = Object.fromEntries(weaponData.find((cat) => cat.id === 'Sub').items.filter((item) => item.variants).map((item) => [`Wsb_${item.file}`, item.variants]));
 
 const listTitle = document.getElementById('list-title');
 const modelList = document.getElementById('model-list');
@@ -3100,6 +3830,29 @@ const categoryBar = document.getElementById('category-bar');
 
 // 무기 이미지: img/weapon_flat/의 item.img. 아직 못 찾은 무기는 'Dummy.png' (weaponData에서 img를 바꾸면 됨)
 let currentCat = null;
+// 서브·스페셜 아이콘: 검은 부분을 잉크 색으로 칠함 (사용자 요청). 무채색 픽셀의 밝기 v(검정 0 ~ 흰색 1)를 잉크 색 ~ 흰색 사이로 옮김 →
+// 검정은 잉크 색, 흰색은 그대로, 경계의 회색은 그 사이. 색이 있는 픽셀(하늘색 등)과 알파는 그대로. 잉크 색을 바꾸면 다시 칠함
+const ICON_GRAY = 24; // 무채색으로 볼 RGB 최대 - 최소 (0~255)
+let listIcons = []; // 지금 목록의 { img, source(원본 Image) }
+function tintIcon({ img, source }) {
+    if (!source.complete || !source.naturalWidth) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = source.naturalWidth;
+    canvas.height = source.naturalHeight;
+    const g = canvas.getContext('2d', { willReadFrequently: true });
+    g.drawImage(source, 0, 0);
+    const data = g.getImageData(0, 0, canvas.width, canvas.height);
+    const d = data.data;
+    const ink = [1, 3, 5].map((i) => parseInt(colorInput.value.slice(i, i + 2), 16));
+    for (let i = 0; i < d.length; i += 4) {
+        if (!d[i + 3] || Math.max(d[i], d[i + 1], d[i + 2]) - Math.min(d[i], d[i + 1], d[i + 2]) > ICON_GRAY) continue;
+        const v = (d[i] + d[i + 1] + d[i + 2]) / 765;
+        for (let c = 0; c < 3; c++) d[i + c] = ink[c] * (1 - v) + 255 * v;
+    }
+    g.putImageData(data, 0, 0);
+    img.src = canvas.toDataURL();
+}
+colorInput.addEventListener('input', () => { for (const icon of listIcons) tintIcon(icon); });
 // 서브·스페셜은 작업 중이라 로컬에서 열 때만 보임 (GitHub Pages 같은 배포 주소에서는 카테고리 버튼을 안 만듦)
 const LOCAL = ['localhost', '127.0.0.1', '[::1]', ''].includes(location.hostname);
 weaponData.forEach(cat => {
@@ -3116,10 +3869,17 @@ weaponData.forEach(cat => {
         listTitle.removeAttribute('data-i18n'); // 처음 글자('무기')만 i18n 키, 이후는 무기군 이름
         listTitle.textContent = categoryName(cat.id);
         modelList.innerHTML = '';
+        listIcons = [];
         cat.items.forEach(item => {
             const li = document.createElement('li');
             const img = document.createElement('img');
             img.src = `img/weapon_flat/${item.img}`;
+            if (cat.prefix === 'Wsb' || cat.prefix === 'Wsp') {
+                const icon = { img, source: new Image() };
+                icon.source.onload = () => tintIcon(icon);
+                icon.source.src = img.src;
+                listIcons.push(icon);
+            }
             img.alt = '';
             img.loading = 'lazy';
             img.draggable = false; // 이미지를 끌면 드래그 스크롤 대신 이미지 끌기가 됨
@@ -3127,10 +3887,10 @@ weaponData.forEach(cat => {
             label.textContent = weaponName(`${cat.id}_${item.file}`);
             li.append(img, label);
             li.dataset.file = item.file;
-            const name = cat.prefix ? `${cat.prefix}_${item.file}` : `Wmn_${cat.id}_${item.file}`;
+            const name = item.model ?? (cat.prefix ? `${cat.prefix}_${item.file}` : `Wmn_${cat.id}_${item.file}`); // model: 다른 이름의 모델 파일을 쓸 때
             li.onclick = () => {
                 exportName = englishWeaponName(`${cat.id}_${item.file}`) ?? name; // 저장 파일 이름은 언어와 상관없이 영어 무기 이름 (없으면 모델 파일 이름)
-                loadGlb(`glb/${name}.glb`, cat.id === 'Maneuver');
+                loadGlb(`glb/${name}.glb`, cat.id === 'Maneuver', item.scale ?? 1, item.hold ?? null, item.layout ?? null);
             };
             modelList.appendChild(li);
         });
@@ -3166,4 +3926,23 @@ mountLangPicker(document.getElementById('lang-picker'));
 
 // 첫 화면: 슈터 목록을 펼치고 스플랫 슈터를 불러옴
 categoryBar.firstChild.click();
-[...modelList.children].find((li) => li.dataset.file === 'NormalT').click();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

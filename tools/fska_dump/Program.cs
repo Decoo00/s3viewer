@@ -51,11 +51,13 @@ foreach (var anim in res.ShaderParamAnims.Values)
     var materials = new Dictionary<string, object>();
     foreach (var m in anim.MaterialAnimDataList)
     {
+        // constants: 커브 없이 애니메이션 동안 고정인 성분 (예: 그레이트 배리어 signal의 M_body emission_color = 1, 0, 0 빨강)
         materials[m.Name] = m.ParamAnimInfos.Select(p => new
         {
             param = p.Name,
             curves = m.Curves.Skip(p.BeginCurve).Take(p.FloatCurveCount).Select(Curve).ToArray(),
-        }).Where(p => p.curves.Length > 0).ToArray();
+            constants = Enumerable.Range(p.BeginConstant, p.ConstantCount).Select(i => new { target = m.Constants[i].AnimDataOffset, value = (float)m.Constants[i].Value }).ToArray(),
+        }).Where(p => p.curves.Length > 0 || p.constants.Length > 0).ToArray();
     }
     shaderParam[anim.Name] = new { frameCount = anim.FrameCount, loop = anim.Loop, materials };
 }
@@ -75,7 +77,32 @@ foreach (var anim in res.TexPatternAnims.Values)
     }
     if (materials.Count > 0) materialParam[anim.Name] = new { frameCount = anim.FrameCount, loop = anim.Loop, materials };
 }
-Console.WriteLine(JsonSerializer.Serialize(new { skeletal, boneVisibility, shaderParam, materialParam }, new JsonSerializerOptions { WriteIndented = true }));
+// 텍스처 패턴: {머티리얼: [{sampler(머티리얼 샘플러 이름), constant(텍스처 이름) 또는 curve({frames, textures}: 그 프레임부터 다음 키까지 그 텍스처)}]}
+object TexCurve(AnimCurve c, string[] names)
+{
+    if (c.CurveType != AnimCurveType.StepInt) throw new InvalidDataException($"texture pattern curve {c.CurveType}");
+    return new { frames = c.Frames, textures = Enumerable.Range(0, c.Keys.GetLength(0)).Select(i => names[(int)c.Keys[i, 0] + (int)c.Offset]).ToArray() };
+}
+// (예: 울트라 샷 WaitHold_UltraShot의 M_Eyelids _a0·_o0 = 한쪽 눈 감은 눈꺼풀)
+var texPattern = new Dictionary<string, object>();
+foreach (var anim in res.TexPatternAnims.Values)
+{
+    var textures = anim.TextureNames.Keys.ToArray();
+    var materials = new Dictionary<string, object>();
+    foreach (var m in anim.MaterialAnimDataList)
+    {
+        var ps = m.PatternAnimInfos.Select(p => new
+        {
+            sampler = p.Name,
+            constant = p.CurveIndex < 0 ? textures[(int)m.Constants[p.BeginConstant].Value] : null,
+            // StepInt 커브: 텍스처 번호 = 키 + Offset(정수, scale 0). 예: Shop_Wait_Blst 눈 깜빡임 키 -1,0,1,2,1,0,-1 + 2 → Opa.0~3
+            curve = p.CurveIndex < 0 ? null : TexCurve(m.Curves[p.CurveIndex], textures),
+        }).ToArray();
+        if (ps.Length > 0) materials[m.Name] = ps;
+    }
+    if (materials.Count > 0) texPattern[anim.Name] = new { frameCount = anim.FrameCount, loop = anim.Loop, textures, materials };
+}
+Console.WriteLine(JsonSerializer.Serialize(new { skeletal, boneVisibility, shaderParam, materialParam, texPattern }, new JsonSerializerOptions { WriteIndented = true }));
 
 // BfresLibrary 버그 우회: bool 옵션이 0개인 머티리얼은 bit flag 오프셋이 0이라 _optionBitFlags가 null이 되고,
 // SetupOptionBooleans의 ToArray에서 터진다 (예: Wmn_Blaster_LightShort_Cstm01의 M_Sticker_Cstm01). 빈 플래그로 채운다

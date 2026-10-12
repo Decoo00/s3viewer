@@ -2,10 +2,10 @@
 뷰어가 캐릭터 몸 glb(build_glb.py 출력)에 같은 본 이름으로 붙여 재생한다. 애니메이션마다 파일 하나라 필요할 때만 받는다.
 
 - 애니메이션 출처: 그 캐릭터 파일에 있으면 그것, 없으면 Player00 (HoianViewer AnimLibrary와 같은 우선순위.
-  _v-* 파일은 11.2.0에 PLAYER_ANIMS 이름이 하나도 없어서 넣지 않음). 예: 오징어 남(Player01)은 Wait만 자기 것, Shop_Wait_*는 Player00 것
+  _v-* 파일은 11.2.0에 PLAYER_ANIMS 이름이 하나도 없어서 넣지 않음. 예외는 VERSION_ANIMS). 예: 오징어 남(Player01)은 Wait만 자기 것, Shop_Wait_*는 Player00 것
 - 게임은 애니메이션에 든 본 전부를 기준값으로 덮으므로, 커브가 없어도 기준값이 바인드 자세와 다른 본도 넣는다 (static_bones)
 - 같은 이름의 머티리얼 애니메이션에 든 셰이더 파라미터 커브(눈동자 이동 M_Eye tex_mtx0)는 animations[0].extras.s3.param_anims에
-  {머티리얼: [{param, target, times, values}]}로 넣는다 (fska_dump materialParam). 같은 애니메이션의 M_Eyelids 텍스처 패턴은 상수(모델 기본 텍스처)라 안 넣음
+  {머티리얼: [{param, target, times, values}]}로 넣는다 (fska_dump materialParam). 텍스처 패턴(M_Eyelids 한쪽 눈 감기·깜빡임)은 extras.s3.tex_patterns에 넣는다
 - 길게 반복하는 대기 동작이라 게임 커브를 프레임당 1번 샘플링 (무기는 2번). 값이 끝까지 같은 채널은 키 하나로 줄임. 둘 다 용량 때문
 
 usage: python build_player_anims.py <Model 폴더> <출력 폴더>  →  <출력 폴더>/<출처 Player0N>_<애니메이션>.glb, index.json
@@ -20,7 +20,19 @@ WEAPON_CODES = ('Blst', 'Brsh', 'Chrg', 'Mnvr', 'Rllr', 'Sber', 'Shlt', 'Shtr', 
 # 스페셜 들기 대기 동작: WaitHold<코드>. 제트팩은 공중 대기(WaitHoldAir_JetPack). 스플래터컬러 스크린(Chimney)·디코이 캐넌(Firework)은 캐릭터 쪽 동작이 없음
 SPECIAL_ANIMS = ('WaitHoldAir_JetPack', 'WaitHold_Blower', 'WaitHold_Chariot', 'WaitHold_GHoko', 'WaitHold_IkuraShoot', 'WaitHold_RainCloud',
                  'WaitHold_SprMissle', 'WaitHold_SuperStamp', 'WaitHold_TripleTornado', 'WaitHold_UltraShot')
-PLAYER_ANIMS = ('Wait',) + tuple(f'Shop_Wait_{c}' for c in WEAPON_CODES) + SPECIAL_ANIMS
+# 탈것 동작: 게 탱크 구체 모드(ToSquid_Chariot)·게 모드(ToHuman_Chariot), 사격(WaitShoot_Chariot)·대포 위/가운데/아래(WaitShootCannon*_Chariot)
+RIDE_ANIMS = ('ToSquid_Chariot', 'ToHuman_Chariot', 'WaitShoot_Chariot', 'WaitShootCannonUp_Chariot', 'WaitShootCannonMdl_Chariot', 'WaitShootCannonDwn_Chariot')
+# 스페셜 발사·작동 동작: 울트라 샷 Shoot_UltraShot (무기 Shot과 같이), 그레이트 배리어 Sp_Start_GreatBarrier (무기 Activate와 같이),
+#   멀티 미사일 발사 WaitShoot_SprMissle_St → WaitShoot_SprMissle → Reload_SprMissle, 흡입기(Blower) 흡입 WaitShoot_Blower·발사 WaitShoot2_Blower, 잉크제트 발사 Shoot_JetPack (무기 애니메이션 없음),
+#   샤크라이드 Sp_Start_Skewer·Skewer_Invocation·Skewer_Run·Skewer_Jump(_Ed) (무기 클립과 같은 이름), 울트라 스탬프 Attack·AttackRush·Return_SuperStamp
+SHOOT_ANIMS = ('Shoot_UltraShot', 'Sp_Start_GreatBarrier', 'WaitShoot_SprMissle_St', 'WaitShoot_SprMissle', 'Reload_SprMissle',
+               'WaitShoot_Blower', 'WaitShoot2_Blower', 'Shoot_JetPack',
+               'Sp_Start_Skewer', 'Skewer_Invocation', 'Skewer_Run', 'Skewer_Jump', 'Skewer_Jump_Ed',
+               'Attack_SuperStamp', 'AttackRush_SuperStamp', 'Return_SuperStamp')
+# 버전 추가 파일에만 있는 동작: {파일: 이름들}. Player00 동작으로 합쳐서 Player00_<이름>.glb (본 이름이 같음).
+#   울트라 착지(트리플 스플래시다운) 시전 Sp_Start_Pogo_St → Sp_Start_Pogo → Sp_Start_Pogo_Ed는 Player00_v-600에만 있음 (11.3.0)
+VERSION_ANIMS = {'Player00_v-600': ('Sp_Start_Pogo_St', 'Sp_Start_Pogo', 'Sp_Start_Pogo_Ed')}
+PLAYER_ANIMS = ('Wait',) + tuple(f'Shop_Wait_{c}' for c in WEAPON_CODES) + SPECIAL_ANIMS + RIDE_ANIMS + SHOOT_ANIMS + tuple(n for names in VERSION_ANIMS.values() for n in names)
 
 
 def skeleton_gltf(bfres, model, work):
@@ -80,6 +92,17 @@ if __name__ == '__main__':
         with open(os.path.join(src_dir, p + '.bfres.zs'), 'rb') as src:
             open(bfres, 'wb').write(dctx.decompress(src.read()))
         anims[p] = build_glb.load_animations(bfres)
+    for f, names in VERSION_ANIMS.items():
+        bfres = os.path.join(work, f + '.bfres')
+        with open(os.path.join(src_dir, f + '.bfres.zs'), 'rb') as src:
+            open(bfres, 'wb').write(dctx.decompress(src.read()))
+        extra = build_glb.load_animations(bfres)
+        for name in names:
+            anims['Player00']['skeletal'][name] = extra['skeletal'][name]
+            if name in extra['materialParam']:
+                anims['Player00']['materialParam'][name] = extra['materialParam'][name]
+            if name in extra['texPattern']:
+                anims['Player00']['texPattern'][name] = extra['texPattern'][name]
     total = 0
     index = {p: {name: f'{p if name in anims[p]["skeletal"] else "Player00"}_{name}.glb' for name in PLAYER_ANIMS} for p in PLAYERS}
     json.dump(index, open(os.path.join(out_dir, 'index.json'), 'w'), indent=1)
@@ -101,7 +124,14 @@ if __name__ == '__main__':
                     mat: [{'param': prm['param'], 'target': c['target'], 'times': [f / 60 for f in frames], 'values': [build_glb.eval_curve(c, f) for f in frames]}
                           for prm in params for c in prm['curves']]
                     for mat, params in mat_anim['materials'].items()}}}
-            build_glb.compensate_segment_scale(gltf, binary)
+            # 텍스처 패턴: {머티리얼: {머티리얼 샘플러: 텍스처 이름 또는 {times, textures}(그 시각부터 다음 키까지)}}
+            # 예: WaitHold_UltraShot M_Eyelids _a0·_o0 = Alb.1·Opa.4 (한쪽 눈 감기), Shop_Wait_* _o0 = Opa.0→1→2→3→0 (눈 깜빡임).
+            # 뷰어가 캐릭터 glb의 tex_patterns(build_glb)에서 같은 이름 텍스처로 바꿔 끼움
+            if pattern := anims[source]['texPattern'].get(name):
+                gltf['animations'][0].setdefault('extras', {}).setdefault('s3', {})['tex_patterns'] = {
+                    mat: {p['sampler']: p['constant'] or {'times': [f / 60 for f in p['curve']['frames']], 'textures': p['curve']['textures']} for p in ps}
+                    for mat, ps in pattern['materials'].items()}
+            build_glb.compensate_segment_scale(gltf, binary, scale_translation=False)  # SSC 자식 위치는 부모 스케일을 안 받음 (HoianViewer 비교)
             binary = compact(gltf, binary)
             out = os.path.join(out_dir, f'{p}_{name}.glb')
             build_glb.write_glb(out, gltf, binary)

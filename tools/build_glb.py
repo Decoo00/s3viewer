@@ -47,6 +47,8 @@ ANIMATIONS = ('Open', 'Close', 'Open_Loop', 'Shot_Long_St', 'Shot_Short_St')
 # 서브(Wsb_)·스페셜(Wsp_): 파일에 있는 애니메이션 전부 (animlist 조사, Claude Handover/tools/animlist/animlist_sub_special.txt). 파일에 없는 이름은 건너뜀.
 #   빼는 것: 'MicroLaserBitAll_Start'(다른 모델 Wsp_MicroLaserBitAll의 본, 메시 없음), 'test'(메가폰 레이저 Firing과 같은 본의 개발용 이름)
 ANIMATIONS_BY_PREFIX = {'Wmn_Spinner_': ('Deform', 'DeformEmm', 'Shot'),
+                        # 잉크 탱크: 잉크제트 탱크 Tnk_JetPack의 대기(발광 0)·폭발 직전(발광 깜빡임). 본 트랙도 들어 있음 (몸과 같은 본 + pipe·nozle)
+                        'Tnk_': ('Wait', 'Warning', 'Sp_Start_TripleTornado_Tnk'),  # 트리플 토네이도 탱크 시작 (로켓 발사, 보임/숨김 포함)
                         'Wmn_Charger_': ('Wmn_Charger_Keeper_Charge', 'Wmn_Charger_Quick_Charge', 'Shot', 'Bullet'),
                         'Wmn_Blaster_': ('Shot', 'JumpShot'),
                         'Wmn_Brush_': ('TransformToAttack', 'TransformToWait', 'Attack'),
@@ -67,13 +69,14 @@ ANIMATIONS_BY_PREFIX = {'Wmn_Spinner_': ('Deform', 'DeformEmm', 'Shot'),
                                  'Warning', 'Wsp_Blower', 'Wsp_TripleTornado_Auto', 'Wsp_UltraShot_Cartridge', 'signal', 'wait')}
 # 커브가 없어도 기준값이 바인드 자세와 다른 본을 넣는 무기군 (게임은 커브가 없는 본에도 애니메이션 기준값을 씀.
 # 예: 플루이드 V·LACT-450의 Charge는 커브 없이 Piston·ReelT·ReelU 기준값만 다름). 다른 무기군은 다시 변환하면 결과가 바뀔 수 있어서 확인한 무기군만
-STATIC_BONE_PREFIXES = ('Wmn_Stringer_', 'Wsb_', 'Wsp_')  # 서브·스페셜은 새로 넣는 거라 처음부터 게임 식으로
+STATIC_BONE_PREFIXES = ('Wmn_Stringer_', 'Wsb_', 'Wsp_', 'Tnk_')  # 서브·스페셜·탱크는 새로 넣는 거라 처음부터 게임 식으로 (베어표 탱크 Wait는 커브 없이 기준값만)
 # 그래도 빼는 본: {모델: {(애니메이션, 본)}}. 탄산 밤 Warning의 Handle은 커브 없이 기준값만 있는데 위치가 바인드의 100배(-28.286 vs -0.283)라
 # 단위 실수로 보임. 넣으면 손잡이가 멀리 날아감 (사용자 확인: 게임에선 안 그럼). 빼면 바인드 위치 + 부모(Scale) 스케일 비율만큼 움직임
 STATIC_BONE_SKIP = {'Wsb_Bomb_Piyo': {('Warning', 'Handle')}}
 # 정적 tex_mtx0·1(SRT)을 material.extras.s3.tex_srt에 넣는 무기군. 뷰어는 tex_srt가 있으면 게임 식(g3d Maya)으로 UV를 바꿈
 # (예: 와이퍼 M_Stamp는 세로 4배라 이걸 안 하면 stamp에 2cl 칠 영역이 안 걸림). 이동 애니메이션의 X 부호도 게임 식을 따르게 되므로 확인한 무기군만
-TEX_SRT_PREFIXES = ('Wmn_Saber_', 'Wsb_', 'Wsp_')  # 서브·스페셜: 컬링 밤 M_Body tex_mtx1 X 30배 (Resource0 줄무늬, Held_fts가 이동)
+TEX_SRT_PREFIXES = ('Wmn_Saber_', 'Wsb_', 'Wsp_', 'Player')  # 서브·스페셜: 컬링 밤 M_Body tex_mtx1 X 30배 (Resource0 줄무늬, Held_fts가 이동)
+# 캐릭터: M_Eyelids·M_Inner tex_mtx0 세로 2배 (눈꺼풀 UV v 0.52~0.98 → 텍스처 전체. 안 하면 감은 눈 Alb.1의 선이 안 보임). 나머지 머티리얼은 단위 행렬
 # 정점 컬러를 넣는 모델: 셰이더가 정점 입력으로 읽음 (decompile: 스플래터컬러 스크린 막 M_Wall, 정점 물결 = 물결 맵 × aColor.z)
 VERTEX_COLOR_MODELS = ('Wsp_ChimneyWall',)
 # 본 flags의 Segment Scale Compensate 비트 (무기 스켈레톤은 스케일 모드 Maya)
@@ -83,6 +86,16 @@ ANIM_SAMPLES_PER_FRAME = 2  # 게임 커브(cubic)를 이 간격으로 샘플링
 GL_WRAP = {0: 10497, 1: 33648, 2: 33071}
 # 왼손 모델(<모델>_L)이 bfres에 없으면 오른손 모델을 X축(좌우)으로 대칭시켜 만든다. 머뉴버는 양손에 하나씩 드는데 듀얼 스위퍼만 _L이 따로 있음
 MIRROR_L = ('Wmn_Maneuver_',)
+# 다른 모델의 본에 붙는 서브 모델: 이름이 흔해서 파일 이름에 원래 모델 이름을 붙임 {(bfres 이름, 모델): 출력 이름}
+# (게임 액터 BulletSpEnergyStandFridge ModelInfo SubModels: Drink.fmdb를 본 Drink0~3에 붙임)
+SUB_MODEL_NAMES = {('Wsp_EnergyStand', 'Drink'): 'Wsp_EnergyStand_Drink'}
+# 캐릭터 애니메이션이 텍스처 패턴으로 텍스처를 바꾸는 머티리얼 (Player00 텍스처 패턴 애니메이션의 머티리얼: M_Eyelids. M_Eye는 눈 색 프리셋으로 따로 넣음)
+PATTERN_MATERIALS = ('M_Eyelids',)
+# 셰이더 파라미터 애니메이션의 고정 성분(커브 없는 값)을 넣는 모델 (fska_dump constants). 다른 모델은 다시 변환하면 결과가 바뀔 수 있어서 확인한 것만
+CONST_PARAM_MODELS = ('Wsp_GreatBarrier', 'Tnk_')  # 잉크 탱크 Warning: emission_color r = 1 고정 (잉크제트 탱크로 확인)
+# 알베도 텍스처를 안 읽는 머티리얼의 알베도 = albedo_color (decompile 감사 build_glb_audit 2.5: _a0을 안 읽는 프로그램 43개). material.extras.s3.albedo_color에 넣음
+# params.albedo_color(조명 없는 머티리얼 표시)와 따로 둠. 다시 변환하면 바뀌는 무기가 많아서 확인한 모델만
+ALBEDO_COLOR_MODELS = ('Wsp_GreatBarrier',)
 
 
 def run(*args):
@@ -311,7 +324,8 @@ def compact_binary(gltf, binary):
     """쓰지 않는 텍스처를 빼고, 1채널 PNG를 회색으로 바꾸고, bufferView를 다시 이어 붙인 binary를 돌려준다"""
     def refs(mat):  # 머티리얼이 가리키는 텍스처 정보 전부 (BfrAss가 채운 emissiveTexture 등 표준 슬롯 포함)
         pbr = mat['pbrMetallicRoughness']
-        return [*mat['extras']['s3']['textures'].values(), *mat['extras']['s3'].get('presets', {}).get('eye', []), *(mat[k] for k in ('normalTexture', 'occlusionTexture', 'emissiveTexture') if k in mat),
+        return [*mat['extras']['s3']['textures'].values(), *mat['extras']['s3'].get('presets', {}).get('eye', []),
+                *(t for p in mat['extras']['s3'].get('tex_patterns', {}).values() for t in p['textures']), *(mat[k] for k in ('normalTexture', 'occlusionTexture', 'emissiveTexture') if k in mat),
                 *(pbr[k] for k in ('baseColorTexture', 'metallicRoughnessTexture') if k in pbr)]
     used = sorted({info['index'] for mat in gltf.get('materials', []) for info in refs(mat)})
     for mat in gltf.get('materials', []):
@@ -500,13 +514,16 @@ def read_vectors(gltf, binary, acc):
     return [list(flat[i:i + width]) for i in range(0, len(flat), width)]
 
 
-def compensate_segment_scale(gltf, binary):
+def compensate_segment_scale(gltf, binary, scale_translation=True):
     """게임 스켈레톤(스케일 모드 Maya)의 SSC 본은 부모 스케일을 물려받지 않고, 위치만 부모 스케일만큼 늘어난다.
     glTF에는 SSC가 없어서 자식이 부모 스케일을 그대로 물려받는다 (예: 파블로 Open/Close에서 Brush_1·Brush_2 스케일이 털 끝까지 겹쳐 곱해짐).
     애니메이션이 스케일을 바꾸는 본 P와 그 SSC 자식 C 사이에 노드를 끼워 스케일 1/S_P를 걸고, C의 위치에 S_P를 곱해 굽는다:
     world(C) = world(P 이동·회전)·S_P·S_P⁻¹·T(S_P·t_C)·R_C·S_C = world(P 이동·회전)·T(S_P·t_C)·R_C·S_C (게임 식과 같음).
     본 flags는 BfrAss가 노드 extras에 넣어 둔다. 바인드 자세는 BfrAss 출력 그대로 둔다: 바인드 스케일 B가 1이 아니면 (예: 컬링 밤 옥타링 Root 0.7, 트리플 토네이도 장치 Root_Joint 1.0024)
-    BfrAss는 C도 B를 물려받게 두므로, 바인드 대비 비율 S_P/B만 위 방식으로 보정한다 (바인드 자세에서는 끼운 노드 스케일 1, 위치 그대로)"""
+    BfrAss는 C도 B를 물려받게 두므로, 바인드 대비 비율 S_P/B만 위 방식으로 보정한다 (바인드 자세에서는 끼운 노드 스케일 1, 위치 그대로)
+    scale_translation=False면 C의 위치도 부모 스케일을 안 받는다: world(C) = world(P 이동·회전)·T(t_C)·R_C·S_C.
+    캐릭터 동작은 이쪽 (HoianViewer 비교: 울트라 스탬프 Return_SuperStamp에서 Arm_1·Arm_2 X 스케일 1.52여도 손 위치는 그대로, 팔 메시만 살짝 늘어남).
+    무기는 아직 위 식 그대로 (HoianViewer와 비교 안 함)"""
     nodes = gltf['nodes']
     anims = [(anim, {(c['target']['node'], c['target']['path']): anim['samplers'][c['sampler']] for c in anim['channels']})
              for anim in gltf.get('animations', [])]
@@ -531,6 +548,8 @@ def compensate_segment_scale(gltf, binary):
             inverse = add_accessor(gltf, binary, [[1 / x for x in v] for v in s], 'VEC3')
             anim['samplers'].append({'input': scale['input'], 'output': inverse, 'interpolation': 'LINEAR'})
             anim['channels'].append({'sampler': len(anim['samplers']) - 1, 'target': {'node': k, 'path': 'scale'}})
+            if not scale_translation:
+                continue
             t = chans.get((c, 'translation'))
             if t is None:
                 t = {'input': scale['input'], 'output': add_accessor(gltf, binary, [nodes[c]['translation']] * len(s), 'VEC3'), 'interpolation': 'LINEAR'}
@@ -559,7 +578,7 @@ def add_visibility_animations(gltf, anims, shape_bones, names):
                     node.setdefault('extras', {}).setdefault('s3', {}).setdefault('visibility', {})[name] = keys
 
 
-def material_param_animations(anims, material, names):
+def material_param_animations(anims, material, names, material_model=''):
     """머티리얼의 셰이더 파라미터 애니메이션 → {애니메이션: {loop, duration, tracks: [{param, target, times, values}]}}
     target은 파라미터 안의 바이트 오프셋 (예: emission_intensity 0, tex_mtx0의 이동 X 16)"""
     result = {}
@@ -567,10 +586,15 @@ def material_param_animations(anims, material, names):
         if name not in names and not name.endswith('_auto'):
             continue
         frames = sample_frames(anim['frameCount'])
+        # 히어로 슈터는 애니메이션 쪽 이름이 M_body (모델은 M_Body). 컬래버 머티리얼(M_Body_Cstm01 등)은 기본 무기 애니메이션을 그대로 따름 (사용자 확인)
+        params = [p for mat, ps in anim['materials'].items() if mat.lower() == re.sub(r'_Cstm\d+$', '', material).lower() for p in ps]
         tracks = [{'param': p['param'], 'target': c['target'], 'times': [f / 60 for f in frames], 'values': [eval_curve(c, f) for f in frames]}
-                  # 히어로 슈터는 애니메이션 쪽 이름이 M_body (모델은 M_Body). 컬래버 머티리얼(M_Body_Cstm01 등)은 기본 무기 애니메이션을 그대로 따름 (사용자 확인)
-                  for mat, params in anim['materials'].items() if mat.lower() == re.sub(r'_Cstm\d+$', '', material).lower()
                   for p in params for c in p['curves']]
+        # 고정 성분도 같은 시각에 같은 값으로 넣음 (예: 그레이트 배리어 signal의 emission_color 빨강). 커브와 키 시각을 맞춰야 뷰어가 성분을 합칠 수 있음
+        # 다시 변환하면 바뀌는 무기가 있을 수 있어서 확인한 무기군만 (CONST_PARAM_MODELS)
+        if material_model.startswith(CONST_PARAM_MODELS):
+            tracks += [{'param': p['param'], 'target': c['target'], 'times': [f / 60 for f in frames], 'values': [c['value']] * len(frames)}
+                       for p in params for c in p.get('constants', [])]
         if tracks:
             result[name] = {'loop': anim['loop'], 'duration': anim['frameCount'] / 60, 'tracks': tracks}
     return result
@@ -583,6 +607,8 @@ def material_param_presets(anims, material, name):
         return None
     result = {}
     for p in anim['materials'][material]:
+        if not p['curves']:
+            continue  # 고정 성분만 있는 파라미터 (fska_dump constants)는 프리셋에 안 씀 (예전 출력과 같게)
         curves = sorted(p['curves'], key=lambda c: c['target'])
         values = [[eval_curve(c, f) for c in curves] for f in range(anim['frameCount'])]
         result[p['param']] = [v[0] if len(v) == 1 else v for v in values]
@@ -774,13 +800,15 @@ def build_file(bfres, out_dir, work, taken):
                               'const_vector': [params[f'const_vector{i}'][:3] for i in range(4)]}
             if used:
                 s3['params'] = used
+            if model.startswith(ALBEDO_COLOR_MODELS) and '_a0' not in textures:
+                s3['albedo_color'] = params['albedo_color'][:3]
             # 화면 색 버퍼를 굴절해서 읽는 유리 (decompile: 포이즌 미스트 M_Bottle, program 13667). 확인한 조합만
             # 확산색 = mix(sqrt(albedo_color) × 화면 색(UV를 뷰 법선 × refract_intensity만큼 밀고, mip = roughness), 조명 받은 albedo_color, Opa 맵)
             if opts.get('gsys_enable_color_buffer') == 'True' and opts.get('blitz_rendering_mode') == '3' and opts.get('enable_albedo_tex') == 'False':
                 s3['refract'] = {'albedo_color': params['albedo_color'][:3], 'roughness': params['roughness'][0], 'refract_intensity': params['refract_intensity'][0]}
             if model.startswith(TEX_SRT_PREFIXES):
                 s3['tex_srt'] = {k: v for k, v in info['tex_srt'].items() if k in ('tex_mtx0', 'tex_mtx1')}
-            if param_anims := material_param_animations(anims, name, names):
+            if param_anims := material_param_animations(anims, name, names, model):
                 s3['param_anims'] = param_anims
             # 캐릭터 색 프리셋: 게임은 이 애니메이션의 프레임 하나를 골라 고정 적용 (HoianViewer PlayerScene.ApplySkinTone·ApplyEyeColor)
             if skin := material_param_presets(anims, name, 'Color_Skin'):
@@ -791,6 +819,17 @@ def build_file(bfres, out_dir, work, taken):
                 eyes = sorted(f[:-4] for f in os.listdir(tex_dirs[0]) if re.fullmatch(r'M_Eye_Alb\.\d+\.png', f))
                 sampler = mat_samplers[name][info['samplers']['_a0']]
                 s3.setdefault('presets', {})['eye'] = [{'index': texture_for(gltf, binary, t, tex_dirs, sampler), 'name': t} for t in eyes]
+            # 캐릭터 애니메이션의 텍스처 패턴이 바꿔 끼우는 텍스처 (build_player_anims tex_patterns. 예: 울트라 샷 WaitHold_UltraShot의
+            # M_Eyelids _a0·_o0 = Alb.1·Opa.4, 한쪽 눈 감기). 같은 이름.<번호> 텍스처를 다 넣음: {머티리얼 샘플러: {shader, textures}}
+            if name in PATTERN_MATERIALS and model.startswith('Player'):
+                patterns = {}
+                for shader_sampler, mat_sampler in info['samplers'].items():
+                    if not (num := re.fullmatch(r'(.+)\.\d+', mats[name].get(mat_sampler, ''))):
+                        continue
+                    alts = sorted((f[:-4] for f in os.listdir(tex_dirs[0]) if re.fullmatch(re.escape(num[1]) + r'\.\d+\.png', f)), key=lambda t: int(t.rsplit('.', 1)[1]))
+                    sampler = mat_samplers[name][mat_sampler]
+                    patterns[mat_sampler] = {'shader': shader_sampler, 'textures': [{'index': texture_for(gltf, binary, t, tex_dirs, sampler), 'name': t} for t in alts]}
+                s3['tex_patterns'] = patterns
             mat.setdefault('extras', {})['s3'] = s3
             # 표준 슬롯도 셰이더 샘플러 기준으로 채운다 (BfrAss는 공유/외부 텍스처일 때 비워둠)
             pbr = mat.setdefault('pbrMetallicRoughness', {})
@@ -803,6 +842,7 @@ def build_file(bfres, out_dir, work, taken):
         binary = compact_binary(gltf, binary)
         # 다른 bfres 파일과 모델 이름이 겹치면 (예: Charger_LongB 안의 모델 이름이 Charger_Long) 파일 이름으로 저장해 덮어쓰지 않게 한다
         name = stem if model != stem and model in taken else model
+        name = SUB_MODEL_NAMES.get((stem, model), name)
         out = os.path.join(out_dir, name + '.glb')
         write_glb(out, gltf, binary)
         results.append((name, os.path.getsize(out)))
