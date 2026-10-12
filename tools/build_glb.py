@@ -46,6 +46,8 @@ ANIMATIONS = ('Open', 'Close', 'Open_Loop', 'Shot_Long_St', 'Shot_Short_St')
 #         덴탈 'Step_SberHeavy00'은 사용자가 요청한 기본/차지/공격에 없어서 넣지 않음. 덴탈 'Shot'은 본 커브가 없고 M_Stamp도 없음
 # 서브(Wsb_)·스페셜(Wsp_): 파일에 있는 애니메이션 전부 (animlist 조사, Claude Handover/tools/animlist/animlist_sub_special.txt). 파일에 없는 이름은 건너뜀.
 #   빼는 것: 'MicroLaserBitAll_Start'(다른 모델 Wsp_MicroLaserBitAll의 본, 메시 없음), 'test'(메가폰 레이저 Firing과 같은 본의 개발용 이름)
+CASTLE_ANIMS = ('Castle_Wait', 'Castle_Walk', 'Castle_Attack', 'Castle_Attack_Ed', 'Castle_JumpAttack', 'Castle_ChargeUp_St', 'Castle_ChargeUp',
+                'Castle_Surprise', 'Sp_Start_Castle_St', 'Sp_Start_Castle', 'Sp_Finish_Castle', 'Castle_Caution', 'Castle_Blink', 'Ripple')
 ANIMATIONS_BY_PREFIX = {'Wmn_Spinner_': ('Deform', 'DeformEmm', 'Shot'),
                         # 잉크 탱크: 잉크제트 탱크 Tnk_JetPack의 대기(발광 0)·폭발 직전(발광 깜빡임). 본 트랙도 들어 있음 (몸과 같은 본 + pipe·nozle)
                         'Tnk_': ('Wait', 'Warning', 'Sp_Start_TripleTornado_Tnk'),  # 트리플 토네이도 탱크 시작 (로켓 발사, 보임/숨김 포함)
@@ -66,10 +68,20 @@ ANIMATIONS_BY_PREFIX = {'Wmn_Spinner_': ('Deform', 'DeformEmm', 'Shot'),
                                  'Sp_PreStart_Pogo_L', 'Sp_PreStart_Pogo_R', 'Sp_Start_Pogo_L', 'Sp_Start_Pogo_L_Ed', 'Sp_Start_Pogo_L_St', 'Sp_Start_Pogo_R',
                                  'Sp_Start_Pogo_R_Ed', 'Sp_Start_Pogo_R_St', 'Sp_Start_Skewer', 'Sphere', 'Throw', 'ThrowBomb_BothHandsShort', 'TransformCrab',
                                  'TransformSphere', 'Turn', 'Wait', 'WaitHold', 'Wait_Drone', 'WalkB', 'WalkBackward', 'WalkF', 'WalkForward', 'WalkL', 'WalkR',
-                                 'Warning', 'Wsp_Blower', 'Wsp_TripleTornado_Auto', 'Wsp_UltraShot_Cartridge', 'signal', 'wait')}
+                                 'Warning', 'Wsp_Blower', 'Wsp_TripleTornado_Auto', 'Wsp_UltraShot_Cartridge', 'signal', 'wait'),
+                        # 로얄크라켄 (오징어 Player00_Castle, 문어 Player02_Castle): 몸 동작은 EXTRA_ANIM_FILES에서 (게임 AS SplPlayerSquid.root.asb가 쓰는 이름),
+                        # 머티리얼 애니메이션은 모델 파일에 (발광 Castle_ChargeUp(_St)·경고 Castle_Caution, 노멀 맵 흐름 Ripple, 눈 텍스처 패턴 Castle_Blink·Castle_Surprise·Castle_ChargeUp_St)
+                        # 'Castle_Caution_Test'는 개발용 이름이라 뺌
+                        'Player00_Castle': CASTLE_ANIMS, 'Player02_Castle': CASTLE_ANIMS}
 # 커브가 없어도 기준값이 바인드 자세와 다른 본을 넣는 무기군 (게임은 커브가 없는 본에도 애니메이션 기준값을 씀.
 # 예: 플루이드 V·LACT-450의 Charge는 커브 없이 Piston·ReelT·ReelU 기준값만 다름). 다른 무기군은 다시 변환하면 결과가 바뀔 수 있어서 확인한 무기군만
-STATIC_BONE_PREFIXES = ('Wmn_Stringer_', 'Wsb_', 'Wsp_', 'Tnk_')  # 서브·스페셜·탱크는 새로 넣는 거라 처음부터 게임 식으로 (베어표 탱크 Wait는 커브 없이 기준값만)
+STATIC_BONE_PREFIXES = ('Wmn_Stringer_', 'Wsb_', 'Wsp_', 'Tnk_', 'Player00_Castle', 'Player02_Castle')  # 서브·스페셜·탱크·크라켄은 새로 넣는 거라 처음부터 게임 식으로 (베어표 탱크 Wait는 커브 없이 기준값만)
+# 몸 동작이 다른 bfres에 있는 모델 {모델 파일: 동작 파일}. 크라켄은 오징어·문어 모습 동작 파일의 Castle_*·Sp_*_Castle (본 이름 Sqd_*가 크라켄 모델과 같음)
+EXTRA_ANIM_FILES = {'Player00_Castle': 'Player_Squid', 'Player02_Castle': 'Player_Octopus'}
+# 변환하지 않는 모델: 크라켄 문어 이펙트용 모델 (본 하나에 숨김 셰이프뿐)
+SKIP_MODELS = ('Player02_Castle_ForEffects',)
+# SSC 자식 위치가 부모 스케일을 안 받는 모델 (compensate_segment_scale scale_translation=False, 캐릭터 동작과 같은 식. 크라켄도 플레이어 스켈레톤)
+SSC_NO_TRANSLATION = ('Player00_Castle', 'Player02_Castle')
 # 그래도 빼는 본: {모델: {(애니메이션, 본)}}. 탄산 밤 Warning의 Handle은 커브 없이 기준값만 있는데 위치가 바인드의 100배(-28.286 vs -0.283)라
 # 단위 실수로 보임. 넣으면 손잡이가 멀리 날아감 (사용자 확인: 게임에선 안 그럼). 빼면 바인드 위치 + 부모(Scale) 스케일 비율만큼 움직임
 STATIC_BONE_SKIP = {'Wsb_Bomb_Piyo': {('Warning', 'Handle')}}
@@ -91,8 +103,12 @@ MIRROR_L = ('Wmn_Maneuver_',)
 SUB_MODEL_NAMES = {('Wsp_EnergyStand', 'Drink'): 'Wsp_EnergyStand_Drink'}
 # 캐릭터 애니메이션이 텍스처 패턴으로 텍스처를 바꾸는 머티리얼 (Player00 텍스처 패턴 애니메이션의 머티리얼: M_Eyelids. M_Eye는 눈 색 프리셋으로 따로 넣음)
 PATTERN_MATERIALS = ('M_Eyelids',)
+# 모델 머티리얼 애니메이션의 텍스처 패턴을 넣는 모델 (material.extras.s3.pattern_anims). 크라켄 M_Eye: Alb·Nrm·Rgh·Tcl .0~.3을 바꿔 눈 모양을 바꿈
+# (Castle_Blink 깜빡임, Castle_Surprise 놀람, Castle_ChargeUp_St 차지 시작). 이 모델 M_Eye의 .0~.3은 눈 색 프리셋이 아니라 눈 모양이라 eye 프리셋은 안 넣음
+PATTERN_ANIM_MODELS = ('Player00_Castle', 'Player02_Castle')
 # 셰이더 파라미터 애니메이션의 고정 성분(커브 없는 값)을 넣는 모델 (fska_dump constants). 다른 모델은 다시 변환하면 결과가 바뀔 수 있어서 확인한 것만
-CONST_PARAM_MODELS = ('Wsp_GreatBarrier', 'Tnk_')  # 잉크 탱크 Warning: emission_color r = 1 고정 (잉크제트 탱크로 확인)
+# 크라켄 Castle_ChargeUp: emission_intensity 10, const_color1 0.99 고정 (커브 없음)
+CONST_PARAM_MODELS = ('Wsp_GreatBarrier', 'Tnk_', 'Player00_Castle', 'Player02_Castle')  # 잉크 탱크 Warning: emission_color r = 1 고정 (잉크제트 탱크로 확인)
 # 알베도 텍스처를 안 읽는 머티리얼의 알베도 = albedo_color (decompile 감사 build_glb_audit 2.5: _a0을 안 읽는 프로그램 43개). material.extras.s3.albedo_color에 넣음
 # params.albedo_color(조명 없는 머티리얼 표시)와 따로 둠. 다시 변환하면 바뀌는 무기가 많아서 확인한 모델만
 ALBEDO_COLOR_MODELS = ('Wsp_GreatBarrier',)
@@ -582,7 +598,9 @@ def material_param_animations(anims, material, names, material_model=''):
     """머티리얼의 셰이더 파라미터 애니메이션 → {애니메이션: {loop, duration, tracks: [{param, target, times, values}]}}
     target은 파라미터 안의 바이트 오프셋 (예: emission_intensity 0, tex_mtx0의 이동 X 16)"""
     result = {}
-    for name, anim in anims['shaderParam'].items():
+    # 텍스처 패턴 애니메이션에 같이 든 셰이더 파라미터 커브 (fska_dump materialParam)는 모델 파일 이름을 정해 둔 것만 (크라켄 Castle_ChargeUp_St 발광)
+    sources = {**anims['shaderParam'], **(anims.get('materialParam', {}) if material_model.startswith(PATTERN_ANIM_MODELS) else {})}
+    for name, anim in sources.items():
         if name not in names and not name.endswith('_auto'):
             continue
         frames = sample_frames(anim['frameCount'])
@@ -705,10 +723,13 @@ def build_file(bfres, out_dir, work, taken):
     names = animation_names(stem)
     if base != stem and not any(anims.values()):
         anims = load_animations(base_bfres)
+    if stem in EXTRA_ANIM_FILES:
+        body = load_animations(os.path.join(os.path.dirname(bfres), EXTRA_ANIM_FILES[stem] + '.bfres'))
+        anims['skeletal'].update({k: v for k, v in body['skeletal'].items() if k in names})
 
     results = []
     for model, mats in models.items():
-        if not mats:
+        if not mats or model in SKIP_MODELS:
             continue  # 메시 없이 본만 있는 모델 (예: Wsp_MicroLaserBitAll). BfrAss가 BIN 청크 없는 glb를 냄
         tmp = os.path.join(work, model + '.glb')
         # 정점 컬러는 빼고 변환: 무기 셰이더 프로그램 265개의 정점 입력에 _c0이 없음 (디컴파일로 확인). VERTEX_COLOR_MODELS만 넣음
@@ -734,7 +755,7 @@ def build_file(bfres, out_dir, work, taken):
             node.setdefault('rotation', [0, 0, 0, 1])
             node.setdefault('scale', [1, 1, 1])
         add_animations(gltf, binary, anims, names, model.startswith(STATIC_BONE_PREFIXES), STATIC_BONE_SKIP.get(model, frozenset()))
-        compensate_segment_scale(gltf, binary)
+        compensate_segment_scale(gltf, binary, scale_translation=not model.startswith(SSC_NO_TRANSLATION))
         add_visibility_animations(gltf, anims, shape_bones, names)
         for node in gltf['nodes']:
             if 'mesh' in node and not shapes[node['name']][0]:
@@ -777,7 +798,8 @@ def build_file(bfres, out_dir, work, taken):
                 if opts.get('enable_shading') == 'False' and opts.get('enable_albedo_tex') == 'False' and opts.get('emission_color_type') == '1':
                     used['albedo_color'] = params['albedo_color'][:3]
             # calc_color 피연산자 100~102 = const_color0~2 (decompile: 캐릭터 몸 M_Body program 13751, 얼굴 M_Face 2600). 피부색 프리셋(Color_Skin)이 이 값을 바꿈
-            for k in range(3):
+            # calc_color3도 (크라켄 M_Body program 7682: calc_color3 C 100 = 발광에 더하는 const_color0)
+            for k in range(4):
                 if opts.get(f'enable_calc_color{k}') == 'True':
                     for op in ('A', 'B', 'C', 'D'):
                         if (v := opts.get(f'blitz_calc_color{k}_{op}')) in ('100', '101', '102'):
@@ -815,13 +837,24 @@ def build_file(bfres, out_dir, work, taken):
                 s3.setdefault('presets', {})['skin'] = skin
             # Color_Eye는 M_Eye _a0 텍스처 패턴 애니메이션. 프레임 i → M_Eye_Alb.<i> (21프레임, 텍스처 이름 목록 순서 그대로. tools 밖 BfresLibrary 덤프로 확인)
             # fska_dump가 텍스처 패턴을 안 읽어서 이름 규칙으로 넣음
-            if name == 'M_Eye' and model.startswith('Player') and '_a0' in textures:
+            if name == 'M_Eye' and model.startswith('Player') and not model.startswith(PATTERN_ANIM_MODELS) and '_a0' in textures:
                 eyes = sorted(f[:-4] for f in os.listdir(tex_dirs[0]) if re.fullmatch(r'M_Eye_Alb\.\d+\.png', f))
                 sampler = mat_samplers[name][info['samplers']['_a0']]
                 s3.setdefault('presets', {})['eye'] = [{'index': texture_for(gltf, binary, t, tex_dirs, sampler), 'name': t} for t in eyes]
             # 캐릭터 애니메이션의 텍스처 패턴이 바꿔 끼우는 텍스처 (build_player_anims tex_patterns. 예: 울트라 샷 WaitHold_UltraShot의
             # M_Eyelids _a0·_o0 = Alb.1·Opa.4, 한쪽 눈 감기). 같은 이름.<번호> 텍스처를 다 넣음: {머티리얼 샘플러: {shader, textures}}
-            if name in PATTERN_MATERIALS and model.startswith('Player'):
+            # 모델 머티리얼 애니메이션의 텍스처 패턴 (PATTERN_ANIM_MODELS): 바꿔 끼울 텍스처는 위와 같은 tex_patterns에, 애니메이션은 pattern_anims에
+            # {애니메이션: {loop, duration, samplers: {머티리얼 샘플러: 텍스처 이름(상수) 또는 {times, textures}(그 시각부터 다음 키까지)}}}
+            pattern_anims = {}
+            if model.startswith(PATTERN_ANIM_MODELS):
+                for anim_name, anim in anims.get('texPattern', {}).items():
+                    if anim_name in names and name in anim['materials']:
+                        pattern_anims[anim_name] = {'loop': anim['loop'], 'duration': anim['frameCount'] / 60, 'samplers': {
+                            p['sampler']: p['constant'] or {'times': [f / 60 for f in p['curve']['frames']], 'textures': p['curve']['textures']}
+                            for p in anim['materials'][name]}}
+                if pattern_anims:
+                    s3['pattern_anims'] = pattern_anims
+            if (name in PATTERN_MATERIALS and model.startswith('Player')) or pattern_anims:
                 patterns = {}
                 for shader_sampler, mat_sampler in info['samplers'].items():
                     if not (num := re.fullmatch(r'(.+)\.\d+', mats[name].get(mat_sampler, ''))):
@@ -864,7 +897,9 @@ if __name__ == '__main__':
     # 기본 무기 텍스처를 찾을 수 있도록, 대상 파일을 모두 먼저 해제해 둔다
     names = sorted(f for f in os.listdir(src_dir) if fnmatch.fnmatch(f, pattern))
     dctx = zstandard.ZstdDecompressor()
-    for f in names:
+    # 몸 동작이 든 다른 파일(EXTRA_ANIM_FILES)도 해제만 (변환은 안 함)
+    extra = [EXTRA_ANIM_FILES[f[:-len('.bfres.zs')]] + '.bfres.zs' for f in names if f[:-len('.bfres.zs')] in EXTRA_ANIM_FILES]
+    for f in names + extra:
         with open(os.path.join(src_dir, f), 'rb') as src:
             open(os.path.join(bfres_dir, f[:-len('.zs')]), 'wb').write(dctx.decompress(src.read()))
     taken = {f[:-len('.bfres.zs')] for f in os.listdir(src_dir) if f.endswith('.bfres.zs')}

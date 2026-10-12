@@ -34,6 +34,7 @@
     "anim.pause": "⏸ 一時停止",
     "anim.play": "▶ 再生",
     "anim.step": "1フレーム進める",
+    "loading": "読み込み中",
     "toon.steps": "陰影の段階",
     "toon.steps2": "2段",
     "toon.steps3": "3段",
@@ -223,7 +224,18 @@
     "wsp.chimneyWall.vanish": "消滅",
     "wsp.chimneyWall.caution": "警告発光",
     "wsp.shachihoko.wait": "待機",
-    "wsp.shachihoko.charge": "チャージ"
+    "wsp.shachihoko.charge": "チャージ",
+    "wsp.castle.wait": "待機",
+    "wsp.castle.walk": "移動",
+    "wsp.castle.attack": "チャージ攻撃",
+    "wsp.castle.jumpAttack": "ジャンプ攻撃",
+    "wsp.castle.charge": "チャージ",
+    "wsp.castle.surprise": "驚き",
+    "wsp.castle.start": "変身",
+    "wsp.castle.finish": "変身解除",
+    "wsp.castle.blink": "まばたき",
+    "wsp.castle.caution": "警告発光",
+    "wsp.castle.ripple": "波紋"
   },
   "categories": {
     "Shooter": "シューター",
@@ -461,6 +473,7 @@
     "Special_Pogo_R": "ウルトラチャクチ",
     "Special_Chimney": "スミナガシート (装置)",
     "Special_ChimneyWall": "スミナガシート (スクリーン)",
-    "Special_Shachihoko": "ガチホコ"
+    "Special_Shachihoko": "ガチホコ",
+    "Special_Castle": "テイオウイカ"
   }
 }
