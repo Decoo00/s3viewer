@@ -1,4 +1,4 @@
-# Splatoon 3 Web Viewer (v0.8.1)
+# Splatoon 3 Web Viewer (v0.9)
 
 [한국어](#한국어) | [English](#english)
 
