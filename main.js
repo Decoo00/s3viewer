@@ -3853,10 +3853,7 @@ function tintIcon({ img, source }) {
     img.src = canvas.toDataURL();
 }
 colorInput.addEventListener('input', () => { for (const icon of listIcons) tintIcon(icon); });
-// 서브·스페셜은 작업 중이라 로컬에서 열 때만 보임 (GitHub Pages 같은 배포 주소에서는 카테고리 버튼을 안 만듦)
-const LOCAL = ['localhost', '127.0.0.1', '[::1]', ''].includes(location.hostname);
 weaponData.forEach(cat => {
-    if (!LOCAL && (cat.prefix === 'Wsb' || cat.prefix === 'Wsp')) return;
     const btn = document.createElement('div');
     btn.className = 'cat-btn';
     btn.style.backgroundImage = `url(img/wpntypes/${cat.img})`;
