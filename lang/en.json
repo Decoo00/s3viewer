@@ -34,6 +34,7 @@
     "anim.pause": "⏸ Pause",
     "anim.play": "▶ Play",
     "anim.step": "Step 1 frame",
+    "loading": "Loading",
     "toon.steps": "Shading steps",
     "toon.steps2": "2 steps",
     "toon.steps3": "3 steps",
@@ -221,7 +222,18 @@
     "wsp.chimneyWall.vanish": "Vanish",
     "wsp.chimneyWall.caution": "Warning glow",
     "wsp.shachihoko.wait": "Idle",
-    "wsp.shachihoko.charge": "Charge"
+    "wsp.shachihoko.charge": "Charge",
+    "wsp.castle.wait": "Idle",
+    "wsp.castle.walk": "Move",
+    "wsp.castle.attack": "Charged attack",
+    "wsp.castle.jumpAttack": "Jump attack",
+    "wsp.castle.charge": "Charge",
+    "wsp.castle.surprise": "Surprise",
+    "wsp.castle.start": "Transform",
+    "wsp.castle.finish": "Revert",
+    "wsp.castle.blink": "Blink",
+    "wsp.castle.caution": "Warning glow",
+    "wsp.castle.ripple": "Ripple"
   },
   "categories": {
     "Shooter": "Shooters",
@@ -459,6 +471,7 @@
     "Special_Pogo_R": "Triple Splashdown",
     "Special_Chimney": "Splattercolor Screen (Device)",
     "Special_ChimneyWall": "Splattercolor Screen (Screen)",
-    "Special_Shachihoko": "Rainmaker"
+    "Special_Shachihoko": "Rainmaker",
+    "Special_Castle": "Kraken Royale"
   }
 }

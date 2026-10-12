@@ -38,6 +38,24 @@
         body > canvas, #ed-preview { background: repeating-conic-gradient(#8a8a8a 0 25%, #b0b0b0 0 50%) 0 0 / 20px 20px; }
         #info { position: absolute; top: 10px; width: 100%; text-align: center; color: white; }
         #version { font-size: 12px; opacity: 0.7; }
+        /* 로딩 아이콘 (main.js trackLoading). 화면 가운데에서 돌고 클릭은 통과. 캔버스 밖이라 PNG·움짤 저장에는 안 찍힘 */
+        #loading {
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            width: 40px;
+            height: 40px;
+            margin: -25px 0 0 -25px;
+            border: 5px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #fff;
+            border-radius: 50%;
+            filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.5));
+            animation: loading-spin 0.8s linear infinite;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #loading[hidden] { display: none; }
+        @keyframes loading-spin { to { transform: rotate(360deg); } }
         /* 화면 위에 겹치는 UI 레이어: 위쪽은 무기 목록, 아래쪽은 하단 바. 서로 영역을 나눠 가져서 겹치지 않음 */
         #ui {
             position: fixed;
@@ -365,7 +383,8 @@
     </style>
 </head>
 <body>
-    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.9</div></div>
+    <div id="info">Splatoon 3 Weapon Viewer<div id="version">v0.9.1</div></div>
+    <div id="loading" role="status" aria-label="불러오는 중" data-i18n-aria="loading" hidden></div>
     <div id="ui">
         <div id="top-right">
             <div class="note" data-i18n="copyright.notice">Splatoon 3 및 관련 이미지·모델 © Nintendo. 비공식 팬 제작 뷰어입니다.</div>

@@ -34,6 +34,7 @@
     "anim.pause": "⏸ 일시정지",
     "anim.play": "▶ 재생",
     "anim.step": "1프레임 넘기기",
+    "loading": "불러오는 중",
     "toon.steps": "명암 단계",
     "toon.steps2": "2단",
     "toon.steps3": "3단",
@@ -221,7 +222,18 @@
     "wsp.chimneyWall.vanish": "소멸",
     "wsp.chimneyWall.caution": "경고 발광",
     "wsp.shachihoko.wait": "대기",
-    "wsp.shachihoko.charge": "차지"
+    "wsp.shachihoko.charge": "차지",
+    "wsp.castle.wait": "대기",
+    "wsp.castle.walk": "이동",
+    "wsp.castle.attack": "차지 공격",
+    "wsp.castle.jumpAttack": "점프 공격",
+    "wsp.castle.charge": "차지",
+    "wsp.castle.surprise": "놀람",
+    "wsp.castle.start": "변신",
+    "wsp.castle.finish": "변신 해제",
+    "wsp.castle.blink": "눈 깜빡임",
+    "wsp.castle.caution": "경고 발광",
+    "wsp.castle.ripple": "물결"
   },
   "categories": {
     "Shooter": "슈터",
@@ -459,6 +471,7 @@
     "Special_Pogo_R": "울트라 착지",
     "Special_Chimney": "스플래터컬러 스크린 (장치)",
     "Special_ChimneyWall": "스플래터컬러 스크린 (스크린)",
-    "Special_Shachihoko": "랭크 피시"
+    "Special_Shachihoko": "랭크 피시",
+    "Special_Castle": "로얄크라켄"
   }
 }
