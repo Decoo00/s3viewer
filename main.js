@@ -6,6 +6,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { editor, cropFrame, savePng, safeName, openSequenceEditor } from './export.js';
 import { t, setText, categoryName, weaponName, englishWeaponName, onLangChange, mountLangPicker } from './i18n.js';
+import { loadEffectData, EffectSet } from './effect.js';
 
 /**
  * TODO
@@ -583,6 +584,7 @@ function disposeModel(model) {
 let loadSeq = 0; // 가장 마지막으로 요청한 로드만 씬에 추가하기 위한 번호
 
 function clearModel() {
+    clearTrapEffect();
     if (currentModel) {
         currentModel.removeFromParent();
         disposeModel(currentModel);
@@ -621,7 +623,7 @@ function setCatText(el, base) {
 }
 function relabelAnimBar(path) {
     const m = path.match(/Wmn_([A-Za-z]+)_|(Ws[bp])_/); // 서브·스페셜은 'wsb'·'wsp'
-    animCat = (m ? m[1] ?? m[2] : 'wsb').toLowerCase(); // 이름 규칙이 다른 모델(잉크 마인 자리의 로커 피규어 Fig_Trap)은 서브로
+    animCat = (m ? m[1] ?? m[2] : 'wsb').toLowerCase(); // 이름 규칙이 다른 모델(트랩 자리의 로커 피규어 Fig_Trap)은 서브로
     for (const el of animBar.querySelectorAll('[data-i18n-cat]')) setCatText(el, el.dataset.i18nCat);
 }
 
@@ -1672,6 +1674,63 @@ function setupSubSpecial(clipSets, path) {
     wsBar.hidden = !wsControls.length;
 }
 
+// 트랩 이펙트 (게임 이미터 데이터, effect.js). 게임 ELink BulletTrap: BombAppear → WpsTrapAppear, Marker → WpsTrapGuide
+// 이미터 크기(ELink Scale) = 커브(SensorRadius 0→0, 10→20) = 감지 반경 × 2. 감지 반경 3.0 = WeaponTrap GameParameterTable SensorRadius Low (서브 성능 업 없음)
+// Guide(감지 범위 표시)는 계속, Appear는 발동 이펙트(사용자 확인)라 버튼으로만. Appear의 무한 수명 이미터(점·기둥)를 언제 끄는지는 게임 근거를 못 찾음 → Life(60프레임) 뒤에 AlphaFadeTime 동안 흐리게 끔 (추정)
+const TRAP_MODEL = /Fig_Trap\.glb$/;
+const TRAP_EFFECT_URL = 'glb/effect/WpsTrap.json';
+const TRAP_SENSOR_RADIUS = 3.0;
+const TRAP_APPEAR_FRAMES = 60;
+const trapEffect = { appear: null, guide: null, root: null, teamColor: new THREE.Color() };
+function clearTrapEffect() {
+    trapEffect.appear?.dispose();
+    trapEffect.guide?.dispose();
+    trapEffect.appear = trapEffect.guide = trapEffect.root = null;
+}
+function playTrapAppear() {
+    if (!trapEffect.appear) return;
+    trapEffect.appear.restart();
+    trapEffect.root.add(trapEffect.appear.group);
+}
+async function setupTrapEffect(root, seq) {
+    const assets = await loadEffectData(TRAP_EFFECT_URL);
+    if (seq !== loadSeq) return;
+    const scale = TRAP_SENSOR_RADIUS * 2;
+    trapEffect.root = root;
+    trapEffect.appear = new EffectSet(assets, 'WpsTrapAppear', { scale });
+    trapEffect.guide = new EffectSet(assets, 'WpsTrapGuide', { scale });
+    root.add(trapEffect.guide.group);
+    const activate = document.createElement('button');
+    setText(activate, 'wsb.trap.activate');
+    activate.addEventListener('click', playTrapAppear);
+    const guideLabel = document.createElement('label');
+    const guideInput = document.createElement('input');
+    guideInput.type = 'checkbox';
+    guideInput.checked = true;
+    const guideText = document.createElement('span');
+    setText(guideText, 'wsb.trap.guide');
+    guideLabel.append(guideInput, ' ', guideText);
+    guideInput.addEventListener('change', () => {
+        if (guideInput.checked) {
+            trapEffect.guide.restart();
+            root.add(trapEffect.guide.group);
+        } else trapEffect.guide.stop();
+    });
+    wsBar.replaceChildren(activate, guideLabel);
+    wsBar.hidden = false;
+    updateAnimBar();
+}
+function updateTrapEffect(dt) {
+    if (!trapEffect.root) return;
+    trapEffect.teamColor.set(colorInput.value);
+    for (const set of [trapEffect.appear, trapEffect.guide]) {
+        if (!set.group.parent) continue;
+        if (set === trapEffect.appear && set.fadeOut === null && set.time >= TRAP_APPEAR_FRAMES) set.stop();
+        set.update(dt, trapEffect.teamColor);
+        if (set.done) set.group.removeFromParent();
+    }
+}
+
 async function readGlb(path) {
     const gltf = await new GLTFLoader().loadAsync(path);
     const materials = new Set();
@@ -1924,6 +1983,11 @@ async function loadGlb(path, twoHanded = false, scale = path === lastGlb?.path ?
         }
         if (gltfs.length === 1) {
             placeModel(gltfs[0].scene, 0, layout);
+            if (TRAP_MODEL.test(path)) {
+                // 로커 피규어는 숨기고 이펙트만 (사용자 요청). 피규어는 놓는 자리·시점 기준으로만 씀
+                gltfs[0].scene.traverse((obj) => { if (obj.isMesh) obj.visible = false; });
+                setupTrapEffect(gltfs[0].scene, seq);
+            }
             return;
         }
         // 양손: 대칭면(X = 0)을 사이에 두고 오른손은 -X, 왼손은 +X. 간격은 보기 위한 값 (게임 근거 없음)
@@ -3036,10 +3100,16 @@ const lineSwapped = [];
 function swapToNormalMaterials() {
     modelPivot.traverse((child) => {
         if (!child.isMesh) return;
+        if (child.userData.effect) { // 이펙트는 선화에서 뺌 (면이 아니라 반투명 판·원통이라 윤곽선이 엉뚱하게 생김)
+            lineSwapped.push(child, child.material);
+            child.material = lineHiddenMaterial;
+            return;
+        }
         lineSwapped.push(child, child.material);
         child.material = Array.isArray(child.material) ? child.material.map(lineNormalMaterial) : lineNormalMaterial(child.material);
     });
 }
+const lineHiddenMaterial = new THREE.MeshBasicMaterial({ visible: false });
 function restoreMaterials() {
     for (let i = 0; i < lineSwapped.length; i += 2) lineSwapped[i].material = lineSwapped[i + 1];
     lineSwapped.length = 0;
@@ -3346,6 +3416,7 @@ document.getElementById('anim-step').addEventListener('click', () => {
 });
 // 무기·캐릭터 애니메이션을 dt초 진행 (animate 루프와 1프레임 넘기기가 같이 씀)
 function advanceAnim(dt) {
+    updateTrapEffect(dt);
     if (character.mixer) {
         character.mixer.update(dt);
         character.tank?.mixer.update(dt);
@@ -3790,7 +3861,7 @@ const weaponData = [
             {file: 'DevilBall', img: 'Wsb_PoisonMist.png', scale: 1},
             {file: 'LineMarker', img: 'Wsb_LineMarker.png', scale: 1},
             {file: 'Bomb_Tako', img: 'Wsb_Bomb_Torpedo.png', scale: 1},
-            // 잉크 마인: 게임엔 전용 모델이 없음 (BulletTrap 액터에 ModelInfo 없이 이펙트만). 로커 피규어 Fig_Trap(LObj_Wsb_Trap)으로 대신 (사용자 요청)
+            // 트랩(잉크 마인): 게임엔 전용 모델이 없음 (BulletTrap 액터에 ModelInfo 없이 이펙트만). 로커 피규어 Fig_Trap(LObj_Wsb_Trap)을 놓는 자리로만 쓰고 숨김, 게임 이펙트(effect.js)를 보여줌 (사용자 요청)
             {file: 'Trap', img: 'Wsb_Trap.png', model: 'Fig_Trap'},
         ] },
     // scale: 모델 배율 (서브와 같음). 울트라 착지 0.5는 사용자 눈대중 (게임 근거 없음)
