@@ -1026,7 +1026,7 @@ function placeModel(object, depthPad = 0, layout = null) {
 // 두 주먹은 한 mixer로 같이 움직이게 한 그룹에 넣고, 왼손 노드 이름에 '__L'을 붙여 오른손 클립 트랙을 복제함 (왼손은 대칭이라 오른손 동작을 그대로 쓰면 거울 동작)
 //   게임 Wsp_Pogo의 _L 클립은 Root만 있고 손가락 본(_L)은 뷰어 모델에 없어서 안 씀
 const POGO_PAIR = /Wsp_Pogo_R\.glb$/;
-const POGO_FIST_DIST = 1.6; // 캐릭터 원점 ↔ 주먹 원점 거리 (눈대중)
+const POGO_FIST_DIST = 4; // 캐릭터 원점 ↔ 주먹 원점 거리 (눈대중)
 async function pogoFists(gltfs, path) {
     const right = gltfs[0];
     const left = await readGlb(path);
@@ -3812,10 +3812,10 @@ const weaponData = [
             {file: 'SkewerTackle', img: 'Wsp_SpSkewer.png', scale: 1},
             {file: 'TripleTornadoBeacon', img: 'Wsp_SpTripleTornado.png', scale: 0.33},
             {file: 'TripleTornado', img: 'Wsp_SpTripleTornado.png', scale: 1},
-            {file: 'EnergyStand', img: 'Wsp_SpEnergyStand.png', scale: 0.75},
+            {file: 'EnergyStand', img: 'Wsp_SpEnergyStand.png', scale: 1},
             {file: 'FireworkPipe', img: 'Wsp_SpFirework.png', scale: 1},
             {file: 'FireworkBomb', img: 'Wsp_SpFirework.png', scale: 1},
-            {file: 'Pogo_R', img: 'Wsp_SpPogo.png', scale: 0.5},
+            {file: 'Pogo_R', img: 'Wsp_SpPogo.png', scale: 1},
             {file: 'Chimney', img: 'Wsp_SpChimney.png', scale: 1},
             {file: 'ChimneyWall', img: 'Wsp_SpChimney.png', scale: 1},
             {file: 'Shachihoko', img: 'Wsp_SpGachihoko.png', scale: 1},
